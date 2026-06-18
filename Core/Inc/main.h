@@ -71,6 +71,8 @@ void Error_Handler(void);
 #define LED_1_GPIO_Port GPIOF
 #define KEY_UP_Pin GPIO_PIN_0
 #define KEY_UP_GPIO_Port GPIOA
+#define LCD_LED_Pin GPIO_PIN_15
+#define LCD_LED_GPIO_Port GPIOB
 
 /* USER CODE BEGIN Private defines */
 

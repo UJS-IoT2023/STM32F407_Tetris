@@ -8,7 +8,7 @@
  * =================================================================== */
 const uint16_t shapes[7][4] = {
     /* I */ { 0x00F0, 0x2222, 0x00F0, 0x2222 },
-    /* T */ { 0x0270, 0x0232, 0x0072, 0x0264 },
+    /* T */ { 0x0072, 0x0262, 0x0270, 0x0232 },
     /* S */ { 0x0063, 0x0264, 0x0063, 0x0264 },
     /* Z */ { 0x0462, 0x006C, 0x0462, 0x006C },
     /* J */ { 0x0446, 0x02E0, 0x0622, 0x0074 },
@@ -252,7 +252,7 @@ static void game_key_handler(void)
     static uint8_t k0_lock, k1_lock, k2_lock, kup_lock;
 
     /* KEY0 (PE4, active-low) → move left */
-    if (HAL_GPIO_ReadPin(KEY_0_GPIO_Port, KEY_0_Pin) == GPIO_PIN_RESET) {
+    if (HAL_GPIO_ReadPin(KEY_2_GPIO_Port, KEY_2_Pin) == GPIO_PIN_RESET) {
         if (!k0_lock) {
             k0_lock = 1;
             if (!check_hit(piece_x - 1, piece_y, piece_rot)) {
@@ -264,7 +264,7 @@ static void game_key_handler(void)
     } else k0_lock = 0;
 
     /* KEY2 (PE2, active-low) → move right */
-    if (HAL_GPIO_ReadPin(KEY_2_GPIO_Port, KEY_2_Pin) == GPIO_PIN_RESET) {
+    if (HAL_GPIO_ReadPin(KEY_0_GPIO_Port, KEY_0_Pin) == GPIO_PIN_RESET) {
         if (!k2_lock) {
             k2_lock = 1;
             if (!check_hit(piece_x + 1, piece_y, piece_rot)) {
@@ -276,37 +276,46 @@ static void game_key_handler(void)
     } else k2_lock = 0;
 
     /* KEY1 (PE3, active-low) → rotate */
-    if (HAL_GPIO_ReadPin(KEY_1_GPIO_Port, KEY_1_Pin) == GPIO_PIN_RESET) {
+    if (HAL_GPIO_ReadPin(KEY_UP_GPIO_Port, KEY_UP_Pin) == GPIO_PIN_RESET) {
         if (!k1_lock) {
             k1_lock = 1;
-            int old_rot = piece_rot;
-            int old_x   = piece_x;
-            piece_rot = (piece_rot + 1) & 3;
 
-            /* wall-kick: shift left if right edge exceeds board */
-            while (piece_x + rightmost_col(piece_type, piece_rot) >= BOARD_COLS)
-                piece_x--;
+            /* Erase the OLD position first (uses current piece_rot) */
+            erase_piece();
 
-            /* if still colliding, try shifting right back */
-            if (check_hit(piece_x, piece_y, piece_rot)) {
-                /* try kick right */
-                if (!check_hit(piece_x + 1, piece_y, piece_rot))
-                    piece_x++;
-                else if (!check_hit(piece_x + 2, piece_y, piece_rot))
-                    piece_x += 2;
-                else {
-                    piece_rot = old_rot;
-                    piece_x   = old_x;
+            int new_rot = (piece_rot + 1) & 3;
+            int new_x   = piece_x;
+
+            /* wall-kick left: if new rotation's right edge overflows */
+            while (new_x + rightmost_col(piece_type, new_rot) >= BOARD_COLS)
+                new_x--;
+
+            /* try kicking right by 1 or 2 cells if still colliding */
+            if (check_hit(new_x, piece_y, new_rot)) {
+                int ok = 0;
+                for (int kick = 1; kick <= 2; kick++) {
+                    if (!check_hit(new_x + kick, piece_y, new_rot)) {
+                        new_x += kick;
+                        ok = 1;
+                        break;
+                    }
                 }
+                if (ok) {
+                    piece_rot = new_rot;
+                    piece_x   = new_x;
+                }
+                /* if not ok: leave piece_rot/piece_x unchanged (rollback) */
+            } else {
+                piece_rot = new_rot;
+                piece_x   = new_x;
             }
 
-            erase_piece();
             draw_piece();
         }
     } else k1_lock = 0;
 
     /* WK_UP (PA0, active-high) → hard drop */
-    if (HAL_GPIO_ReadPin(KEY_UP_GPIO_Port, KEY_UP_Pin) == GPIO_PIN_SET) {
+    if (HAL_GPIO_ReadPin(KEY_1_GPIO_Port, KEY_1_Pin) == GPIO_PIN_SET) {
         if (!kup_lock) {
             kup_lock = 1;
             erase_piece();
