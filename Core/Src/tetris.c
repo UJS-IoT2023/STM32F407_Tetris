@@ -314,8 +314,8 @@ static void game_key_handler(void)
         }
     } else k1_lock = 0;
 
-    /* WK_UP (PA0, active-high) → hard drop */
-    if (HAL_GPIO_ReadPin(KEY_1_GPIO_Port, KEY_1_Pin) == GPIO_PIN_SET) {
+   /* WK_UP (PA0, active-high) → hard drop */
+    if (HAL_GPIO_ReadPin(KEY_1_GPIO_Port, KEY_1_Pin) == GPIO_PIN_RESET) {
         if (!kup_lock) {
             kup_lock = 1;
             erase_piece();
@@ -336,16 +336,23 @@ static void game_key_handler(void)
 
 static void show_game_over(void)
 {
-    /* dark overlay on the board area */
+    /* fill the entire board area with white */
     LCD_Fill(BOARD_X_OFF, BOARD_Y_OFF,
              BOARD_X_OFF + BOARD_COLS * BLOCK_SIZE - 1,
-             BOARD_Y_OFF + BOARD_ROWS * BLOCK_SIZE - 1, BLACK);
-    POINT_COLOR = RED;
-    BACK_COLOR  = BLACK;
-    LCD_ShowString(BOARD_X_OFF + 10, 300, 300, 24, 24,
+             BOARD_Y_OFF + BOARD_ROWS * BLOCK_SIZE - 1, WHITE);
+    POINT_COLOR = BLACK;
+    BACK_COLOR  = WHITE;
+    LCD_ShowString(BOARD_X_OFF + 30, 120, 300, 24, 24,
                    (uint8_t *)"GAME  OVER");
-    POINT_COLOR = WHITE;
-    LCD_ShowString(BOARD_X_OFF + 10, 340, 300, 16, 16,
+    POINT_COLOR = BLACK;
+    LCD_ShowString(BOARD_X_OFF + 15, 180, 120, 16, 16, (uint8_t *)"SCORE");
+    LCD_ShowxNum(BOARD_X_OFF + 80, 180, score, 6, 16, 0x80);
+    LCD_ShowString(BOARD_X_OFF + 15, 210, 120, 16, 16, (uint8_t *)"LINES");
+    LCD_ShowxNum(BOARD_X_OFF + 80, 210, lines_total, 6, 16, 0x80);
+    LCD_ShowString(BOARD_X_OFF + 15, 240, 120, 16, 16, (uint8_t *)"LEVEL");
+    LCD_ShowxNum(BOARD_X_OFF + 80, 240, level, 2, 16, 0x80);
+    POINT_COLOR = GRAY;
+    LCD_ShowString(BOARD_X_OFF + 30, 320, 300, 16, 16,
                    (uint8_t *)"Press KEY0");
 }
 
@@ -356,6 +363,7 @@ static void draw_static_ui(void)
     LCD_Init();
     LCD_Display_Dir(0);   /* portrait 480 x 800 */
     LCD_Clear(WHITE);
+    BACK_COLOR  = WHITE;
 
     /* header */
     POINT_COLOR = BLACK;
