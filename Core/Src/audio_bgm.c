@@ -22,6 +22,9 @@ static volatile uint8_t audio_running;
 static uint32_t pcm_pos;
 static uint8_t bgm_volume = AUDIO_VOLUME_DEFAULT;
 
+/* ES8388 和 EEPROM 共用 PB8/PB9，因此这里用软件 I2C 只在初始化
+ * 音频 Codec 时发送寄存器配置。
+ */
 static void delay_short(void)
 {
     for (volatile uint32_t i = 0; i < 60; i++) {
@@ -145,6 +148,9 @@ static void es8388_init_playback(void)
 {
     es_i2c_init();
 
+    /* 只配置播放所需的 Codec 通路：电源、DAC、I2S 格式和较低的
+     * 模拟输出音量；菜单音量通过 PCM 数字缩放完成。
+     */
     es8388_write_reg(0x00, 0x80);
     es8388_write_reg(0x00, 0x00);
     HAL_Delay(100);
@@ -182,6 +188,9 @@ static int16_t next_sample(void)
 
 static void fill_audio(int16_t *dst, size_t count)
 {
+    /* DMA 缓冲区按双声道输出，BGM 源数据为单声道，所以每个采样
+     * 同时写入左右声道，并按 0..10 的菜单音量做缩放。
+     */
     for (size_t i = 0; i < count; i += 2U) {
         int16_t sample = audio_running ? next_sample() : 0;
         sample = (int16_t)(((int32_t)sample * bgm_volume * AUDIO_VOLUME_LIMIT_PCT) /
@@ -195,6 +204,7 @@ static void i2s_clock_init(void)
 {
     RCC_PeriphCLKInitTypeDef PeriphClkInitStruct = {0};
 
+    /* 8 kHz 对板载小扬声器已经足够，同时能明显减小 PCM 数组体积。 */
     PeriphClkInitStruct.PeriphClockSelection = RCC_PERIPHCLK_I2S;
     PeriphClkInitStruct.PLLI2S.PLLI2SN = 192;
     PeriphClkInitStruct.PLLI2S.PLLI2SR = 5;
@@ -206,6 +216,7 @@ void Audio_BGM_Init(void)
     i2s_clock_init();
     es8388_init_playback();
 
+    /* DMA 只启动一次，之后在回调中持续填充静音或音乐数据。 */
     fill_audio(audio_buffer, AUDIO_BUFFER_SAMPLES);
 
     hi2s_bgm.Instance = SPI2;
@@ -311,6 +322,7 @@ void HAL_I2S_MspInit(I2S_HandleTypeDef *hi2s)
 void HAL_I2S_TxHalfCpltCallback(I2S_HandleTypeDef *hi2s)
 {
     if (hi2s->Instance == SPI2) {
+        /* 重新填充 DMA 刚发送完的前半段缓冲区。 */
         fill_audio(&audio_buffer[0], AUDIO_BUFFER_SAMPLES / 2U);
     }
 }
@@ -318,6 +330,7 @@ void HAL_I2S_TxHalfCpltCallback(I2S_HandleTypeDef *hi2s)
 void HAL_I2S_TxCpltCallback(I2S_HandleTypeDef *hi2s)
 {
     if (hi2s->Instance == SPI2) {
+        /* 重新填充后半段缓冲区，实现非阻塞连续循环播放。 */
         fill_audio(&audio_buffer[AUDIO_BUFFER_SAMPLES / 2U], AUDIO_BUFFER_SAMPLES / 2U);
     }
 }

@@ -1,0 +1,8 @@
+C:/Users/29750/Desktop/STM32F407_Tetris/Core/Src/app_rtc.c:12:16:month_from_build	24	static
+C:/Users/29750/Desktop/STM32F407_Tetris/Core/Src/app_rtc.c:24:16:dec2	16	static
+C:/Users/29750/Desktop/STM32F407_Tetris/Core/Src/app_rtc.c:29:13:build_datetime	24	static
+C:/Users/29750/Desktop/STM32F407_Tetris/Core/Src/app_rtc.c:47:16:rtc_clock_config	80	static
+C:/Users/29750/Desktop/STM32F407_Tetris/Core/Src/app_rtc.c:79:6:App_RTC_Init	24	static
+C:/Users/29750/Desktop/STM32F407_Tetris/Core/Src/app_rtc.c:115:9:App_RTC_IsRunning	4	static
+C:/Users/29750/Desktop/STM32F407_Tetris/Core/Src/app_rtc.c:120:6:App_RTC_GetDateTime	40	static
+C:/Users/29750/Desktop/STM32F407_Tetris/Core/Src/app_rtc.c:144:9:App_RTC_SetDateTime	40	static

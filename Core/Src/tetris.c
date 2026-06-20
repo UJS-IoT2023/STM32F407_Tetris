@@ -1,14 +1,18 @@
 ﻿#include "tetris.h"
 #include "audio_bgm.h"
+#include "app_rtc.h"
+#include "app_settings.h"
+#include "led_feedback.h"
+#include "spi_flash.h"
 #include <stdlib.h>
 #include <string.h>
-/* IR decoder externs (from stm32f4xx_it.c) */
+/* 红外解码结果由 stm32f4xx_it.c 的中断逻辑更新。 */
 extern volatile uint8_t  ir_ready;
 extern volatile uint32_t ir_code;
 
 /* ===================================================================
- *  Shape data  (tinytetris-compatible 4x4 bitmaps)
- *  Row j (0=top of 4x4 grid), col i (0=left):  bit  j*4 + i
+ *  俄罗斯方块形状数据，使用 4x4 位图描述。
+ *  第 j 行、第 i 列对应 bit(j*4+i)，便于旋转形态查表。
  * =================================================================== */
 const uint16_t shapes[7][4] = {
     /* I */ { 0x00F0, 0x2222, 0x00F0, 0x2222 },
@@ -20,35 +24,39 @@ const uint16_t shapes[7][4] = {
     /* O */ { 0x0660, 0x0660, 0x0660, 0x0660 },
 };
 
-/* colour index: 0=empty, 1=I 鈥?7=O */
+/* 颜色索引：0 为空格，1..7 分别对应七种方块。 */
 const uint16_t COLOR_MAP[8] = {
-    WHITE,   /* 0 background */
+    WHITE,   /* 0 背景 */
     CYAN,    /* 1 I */
     MAGENTA, /* 2 T */
     GREEN,   /* 3 S */
     RED,     /* 4 Z */
     BLUE,    /* 5 J */
-    BRRED,   /* 6 L  (brown-red 鈮?orange) */
+    BRRED,   /* 6 L */
     YELLOW,  /* 7 O */
 };
 
-/* ---- game state -------------------------------------------------- */
-static uint8_t  board[BOARD_ROWS][BOARD_COLS];   /* 0=empty, 1-7=colour */
+/* ---- 游戏状态 ---------------------------------------------------- */
+static uint8_t  board[BOARD_ROWS][BOARD_COLS];   /* 0 为空格，1..7 为颜色索引 */
 static int8_t   piece_type, next_type;
-static int8_t   piece_rot;                        /* 0-3 */
-static int8_t   piece_x, piece_y;                 /* grid coords (top-left of 4x4) */
+static int8_t   piece_rot;                        /* 当前旋转形态，范围 0..3 */
+static int8_t   piece_x, piece_y;                 /* 4x4 方块左上角在棋盘中的坐标 */
 static uint32_t score, lines_total, level;
-static uint32_t fall_speed;                       /* ms per gravity tick */
+static uint32_t fall_speed;                       /* 自动下落间隔，单位 ms */
 static uint32_t last_fall_tick, last_key_tick;
 static uint8_t  game_state;
 static int8_t   ghost_y;
 static uint8_t  menu_volume_drawn = 0xFF;
+static uint8_t  menu_history_visible;
+static uint8_t  menu_history_page;
+static uint32_t game_start_tick;
+static app_datetime_t game_start_time;
 
 #define STATE_MENU       0
 #define STATE_PLAYING    1
 #define STATE_GAME_OVER  2
 
-/* ---- helpers ----------------------------------------------------- */
+/* ---- 通用辅助函数 ------------------------------------------------ */
 static inline uint16_t shape_word(int type, int rot)
 {
     return shapes[type][rot];
@@ -59,9 +67,9 @@ static inline int cell_set(int type, int rot, int i, int j)
     return (shape_word(type, rot) >> (j * 4 + i)) & 1;
 }
 
-/* ---- low-level drawing ------------------------------------------- */
+/* ---- 底层绘制 ---------------------------------------------------- */
 
-/* Draw a single block at grid (gx, gy) with colour index ci */
+/* 在棋盘坐标 (gx, gy) 绘制一个小方块。 */
 static void draw_block(uint8_t gx, uint8_t gy, uint8_t ci)
 {
     uint16_t px1 = BOARD_X_OFF + gx * BLOCK_SIZE;
@@ -75,18 +83,18 @@ static void draw_block(uint8_t gx, uint8_t gy, uint8_t ci)
         LCD_DrawRectangle(px1, py1, px2, py2);
     } else {
         LCD_Fill(px1, py1, px2, py2, COLOR_MAP[ci]);
-        /* highlight: top & left edges */
+        /* 左上高光，增强小方块立体感。 */
         POINT_COLOR = WHITE;
         LCD_DrawLine(px1, py1, px2, py1);
         LCD_DrawLine(px1, py1, px1, py2);
-        /* shadow: bottom & right edges */
+        /* 右下阴影。 */
         POINT_COLOR = GRAY;
         LCD_DrawLine(px1, py2, px2, py2);
         LCD_DrawLine(px2, py1, px2, py2);
     }
 }
 
-/* Draw one small block for the next-piece preview panel */
+/* 绘制右侧 NEXT 预览框中的小方块。 */
 static void draw_next_block(uint8_t gx, uint8_t gy, uint8_t ci)
 {
     uint16_t px1 = PANEL_X + gx * NEXT_SIZE;
@@ -96,7 +104,7 @@ static void draw_next_block(uint8_t gx, uint8_t gy, uint8_t ci)
     LCD_Fill(px1, py1, px2, py2, ci ? COLOR_MAP[ci] : WHITE);
 }
 
-/* ---- board / piece rendering ------------------------------------- */
+/* ---- 棋盘和方块绘制 ---------------------------------------------- */
 
 static void draw_board_full(void)
 {
@@ -105,7 +113,7 @@ static void draw_board_full(void)
             draw_block(c, r, board[r][c]);
 }
 
-/* Erase current piece from screen (restore board cells underneath) */
+/* 擦除当前活动方块，恢复其下方已有棋盘格。 */
 static void erase_piece(void)
 {
     for (int j = 0; j < 4; j++)
@@ -118,7 +126,7 @@ static void erase_piece(void)
             }
 }
 
-/* Draw current piece on screen */
+/* 绘制当前活动方块。 */
 static void draw_piece(void)
 {
     for (int j = 0; j < 4; j++)
@@ -131,10 +139,10 @@ static void draw_piece(void)
             }
 }
 
-/* Draw the next-piece preview box */
+/* 绘制下一个方块预览框。 */
 static void draw_next_piece(void)
 {
-    /* clear preview area */
+    /* 先清空预览区域，避免上一块残影。 */
     LCD_Fill(PANEL_X, NEXT_Y,
              PANEL_X + 4 * NEXT_SIZE - 1,
              NEXT_Y  + 4 * NEXT_SIZE - 1, WHITE);
@@ -144,7 +152,7 @@ static void draw_next_piece(void)
                 draw_next_block(i, j, next_type + 1);
 }
 
-/* ---- score / level display --------------------------------------- */
+/* ---- 分数和等级显示 ---------------------------------------------- */
 
 static void draw_score_panel(void)
 {
@@ -158,7 +166,7 @@ static void draw_score_panel(void)
     LCD_ShowxNum(PANEL_X, LEVEL_Y, level,       2, 12, 0x80);
 }
 
-/* ---- collision detection ----------------------------------------- */
+/* ---- 碰撞检测 ---------------------------------------------------- */
 
 static int check_hit(int x, int y, int rot)
 {
@@ -175,7 +183,7 @@ static int check_hit(int x, int y, int rot)
     return 0;
 }
 
-/* ---- merge piece into board -------------------------------------- */
+/* ---- 固定当前方块到棋盘 ------------------------------------------ */
 
 static void merge_piece(void)
 {
@@ -189,7 +197,7 @@ static void merge_piece(void)
             }
 }
 
-/* ---- line removal ----------------------------------------------- */
+/* ---- 消行逻辑 ---------------------------------------------------- */
 
 static int rightmost_col(int type, int rot)
 {
@@ -209,11 +217,11 @@ static void remove_lines(void)
             if (!board[r][c]) { full = 0; break; }
         if (full) {
             cleared++;
-            /* shift rows above down */
+            /* 将上方行整体下移。 */
             for (int rr = r; rr > 0; rr--)
                 memcpy(board[rr], board[rr - 1], BOARD_COLS);
             memset(board[0], 0, BOARD_COLS);
-            r++; /* recheck this row */
+            r++; /* 下移后需要重新检查当前行。 */
         }
     }
     if (cleared) {
@@ -223,11 +231,12 @@ static void remove_lines(void)
         level        = lines_total / 10;
         fall_speed   = FALL_SPEED_INIT - level * 30;
         if (fall_speed < FALL_SPEED_MIN) fall_speed = FALL_SPEED_MIN;
+        Led_Feedback_SetState(LED_FEEDBACK_LINE_CLEAR);
         draw_score_panel();
     }
 }
 
-/* ---- spawn new piece --------------------------------------------- */
+/* ---- 生成新方块 -------------------------------------------------- */
 
 static void new_piece(void)
 {
@@ -245,7 +254,7 @@ static void new_piece(void)
     draw_next_piece();
 }
 
-/* ---- beep feedback ---------------------------------------------- */
+/* ---- 按键音反馈 -------------------------------------------------- */
 
 static void beep_short(void)
 {
@@ -254,11 +263,11 @@ static void beep_short(void)
     HAL_GPIO_WritePin(BEEP_GPIO_Port, BEEP_Pin, GPIO_PIN_RESET);
 }
 
-/* forward decl for ghost functions used in key handler */
+/* 影子方块函数声明，按键处理中需要提前使用。 */
 static void erase_ghost(void);
 static void draw_ghost(void);
 
-/* ---- key handler (non-blocking, 20 ms debounce) ------------------ */
+/* ---- 按键处理，非阻塞，20 ms 消抖 ------------------------------- */
 
 static void game_key_handler(void)
 {
@@ -268,7 +277,7 @@ static void game_key_handler(void)
 
     static uint8_t k0_lock, k1_lock, k2_lock, kup_lock;
 
-    /* KEY0 (PE4, active-low) 鈫?move left */
+    /* KEY0：左移。 */
     if (HAL_GPIO_ReadPin(KEY_2_GPIO_Port, KEY_2_Pin) == GPIO_PIN_RESET) {
         if (!k0_lock) {
             k0_lock = 1;
@@ -282,7 +291,7 @@ static void game_key_handler(void)
         }
     } else k0_lock = 0;
 
-    /* KEY2 (PE2, active-low) 鈫?move right */
+    /* KEY2：右移。 */
     if (HAL_GPIO_ReadPin(KEY_0_GPIO_Port, KEY_0_Pin) == GPIO_PIN_RESET) {
         if (!k2_lock) {
             k2_lock = 1;
@@ -296,23 +305,23 @@ static void game_key_handler(void)
         }
     } else k2_lock = 0;
 
-    /* KEY1 (PE3, active-low) 鈫?rotate */
+    /* KEY1：旋转。 */
     if (HAL_GPIO_ReadPin(KEY_UP_GPIO_Port, KEY_UP_Pin) == GPIO_PIN_RESET) {
         if (!k1_lock) {
             k1_lock = 1;
 
-            /* Erase the OLD position first (uses current piece_rot) */
+            /* 先按旧位置擦除，再尝试应用旋转后的新位置。 */
             erase_ghost();
             erase_piece();
 
             int new_rot = (piece_rot + 1) & 3;
             int new_x   = piece_x;
 
-            /* wall-kick left: if new rotation's right edge overflows */
+            /* 旋转后如果右侧越界，先向左修正。 */
             while (new_x + rightmost_col(piece_type, new_rot) >= BOARD_COLS)
                 new_x--;
 
-            /* try kicking right by 1 or 2 cells if still colliding */
+            /* 如果仍然碰撞，再尝试向右微调 1 到 2 格。 */
             if (check_hit(new_x, piece_y, new_rot)) {
                 int ok = 0;
                 for (int kick = 1; kick <= 2; kick++) {
@@ -326,7 +335,7 @@ static void game_key_handler(void)
                     piece_rot = new_rot;
                     piece_x   = new_x;
                 }
-                /* if not ok: leave piece_rot/piece_x unchanged (rollback) */
+                /* 仍不合法则回滚，保持原旋转和原位置。 */
             } else {
                 piece_rot = new_rot;
                 piece_x   = new_x;
@@ -337,7 +346,7 @@ static void game_key_handler(void)
         }
     } else k1_lock = 0;
 
-   /* WK_UP (PA0, active-high) 鈫?hard drop */
+   /* WK_UP：硬降到底。 */
     if (HAL_GPIO_ReadPin(KEY_1_GPIO_Port, KEY_1_Pin) == GPIO_PIN_RESET) {
         if (!kup_lock) {
             kup_lock = 1;
@@ -348,7 +357,7 @@ static void game_key_handler(void)
             merge_piece();
             draw_board_full();
             remove_lines();
-            draw_board_full();     /* redraw after line shift */
+            draw_board_full();     /* 消行搬移后重绘棋盘。 */
             beep_short();
             new_piece();
             if (game_state == STATE_PLAYING) { draw_piece(); draw_ghost(); }
@@ -356,11 +365,22 @@ static void game_key_handler(void)
     } else kup_lock = 0;
 }
 
-/* ---- game-over screen ------------------------------------------- */
+/* ---- 游戏结束页面 ------------------------------------------------ */
 
 static void show_game_over(void)
 {
+    spi_flash_game_record_t last_record;
+    uint32_t duration_seconds = (HAL_GetTick() - game_start_tick) / 1000U;
+
     Audio_BGM_Stop();
+    Led_Feedback_SetState(LED_FEEDBACK_GAME_OVER);
+    /* 游戏结束时同时写 EEPROM 历史记录和 SPI FLASH 最近一局快照。 */
+    App_Settings_AddGameResult(score, lines_total, duration_seconds, &game_start_time);
+    last_record.score = score;
+    last_record.lines = lines_total;
+    last_record.level = level;
+    last_record.volume = Audio_BGM_GetVolume();
+    (void)SpiFlash_SaveGameRecord(&last_record);
     LCD_Fill(BOARD_X_OFF + 4, BOARD_Y_OFF + 52,
              BOARD_X_OFF + BOARD_COLS * BLOCK_SIZE - 5,
              BOARD_Y_OFF + 184, WHITE);
@@ -374,33 +394,35 @@ static void show_game_over(void)
     LCD_ShowxNum(BOARD_X_OFF + 54, BOARD_Y_OFF + 132, score, 5, 12, 0x80);
     LCD_ShowString(BOARD_X_OFF + 12, BOARD_Y_OFF + 150, 72, 12, 12, (uint8_t *)"LINES");
     LCD_ShowxNum(BOARD_X_OFF + 54, BOARD_Y_OFF + 150, lines_total, 4, 12, 0x80);
+    LCD_ShowString(BOARD_X_OFF + 12, BOARD_Y_OFF + 168, 72, 12, 12, (uint8_t *)"BEST");
+    LCD_ShowxNum(BOARD_X_OFF + 54, BOARD_Y_OFF + 168, App_Settings_Get()->high_score, 5, 12, 0x80);
     POINT_COLOR = GRAY;
-    LCD_ShowString(BOARD_X_OFF + 20, BOARD_Y_OFF + 172, 96, 12, 12,
+    LCD_ShowString(BOARD_X_OFF + 20, BOARD_Y_OFF + 188, 96, 12, 12,
                    (uint8_t *)"KEY0 START");
 }
 
-/* ---- static UI (Swiss-style) ------------------------------------ */
+/* ---- 游戏主界面静态布局 ------------------------------------------ */
 
 static void draw_static_ui(void)
 {
     LCD_Init();
-    LCD_Display_Dir(0);   /* portrait 240 x 320 */
+    LCD_Display_Dir(0);   /* 竖屏 240 x 320。 */
     LCD_Clear(WHITE);
     BACK_COLOR  = WHITE;
 
-    /* header */
+    /* 顶部标题。 */
     POINT_COLOR = BLACK;
     LCD_ShowString(8, 8, 140, 16, 16, (uint8_t *)"TETRIS");
 
-    /* thick divider line */
+    /* 顶部分隔线。 */
     LCD_Fill(8, 27, 232, 29, BLACK);
 
-    /* board border */
+    /* 棋盘边框。 */
     LCD_DrawRectangle(BOARD_X_OFF - 1, BOARD_Y_OFF - 1,
                       BOARD_X_OFF + BOARD_COLS * BLOCK_SIZE,
                       BOARD_Y_OFF + BOARD_ROWS * BLOCK_SIZE);
 
-    /* right panel labels */
+    /* 右侧信息面板。 */
     POINT_COLOR = GRAY;
     LCD_ShowString(PANEL_X, NEXT_Y - 16, 56, 12, 12, (uint8_t *)"NEXT");
     LCD_DrawRectangle(PANEL_X - 1, NEXT_Y - 1,
@@ -418,19 +440,19 @@ static void draw_static_ui(void)
     LCD_ShowString(8, CTRL_Y + 28, 88, 12, 12, (uint8_t *)"K1 ROT");
     LCD_ShowString(8, CTRL_Y + 42, 88, 12, 12, (uint8_t *)"UP DROP");
 
-    /* footer divider */
+    /* 底部分隔线。 */
     LCD_Fill(8, 306, 232, 307, BLACK);
     POINT_COLOR = LGRAY;
     LCD_ShowString(8, 309, 144, 12, 12, (uint8_t *)"STM32F407");
 }
-/* forward declarations for ghost functions used by ir_do_action */
+/* 影子方块函数声明，红外遥控动作中也会使用。 */
 
 static void erase_ghost(void);
 
 static void draw_ghost(void);
 
 
-/* ---- IR remote key polling -------------------------------------- */
+/* ---- 红外遥控按键轮询 -------------------------------------------- */
 
 static uint8_t ir_read_key(uint32_t *code)
 
@@ -509,7 +531,7 @@ static void ir_do_action(uint32_t code)
 }
 
 
-/* ---- start screen ----------------------------------------------- */
+/* ---- 开始菜单 ---------------------------------------------------- */
 
 static void draw_start_screen(void)
 
@@ -540,6 +562,8 @@ static void draw_start_screen(void)
     POINT_COLOR = BLACK; BACK_COLOR = WHITE;
 
     LCD_ShowString(14, 198, 72, 12, 12, (uint8_t *)"BGM VOL");
+    LCD_ShowString(14, 232, 48, 12, 12, (uint8_t *)"BEST");
+    LCD_ShowxNum(58, 232, App_Settings_Get()->high_score, 5, 12, 0x80);
 
     POINT_COLOR = GRAY;
     LCD_DrawRectangle(142, 48, 226, 206);
@@ -559,7 +583,82 @@ static void draw_start_screen(void)
     POINT_COLOR = LGRAY; BACK_COLOR = WHITE;
 
     menu_volume_drawn = 0xFF;
+    menu_history_visible = 0;
 
+}
+
+static void draw_eeprom_history_screen(void)
+{
+    const app_settings_t *s = App_Settings_Get();
+    const uint8_t per_page = 2;
+    uint8_t pages = (s->history_count + per_page - 1U) / per_page;
+    uint8_t start;
+
+    /* 小屏幕每页显示两条记录；每条记录分两行显示时间和分数。 */
+    if (pages == 0U) {
+        pages = 1U;
+    }
+    if (menu_history_page >= pages) {
+        menu_history_page = (uint8_t)(pages - 1U);
+    }
+    start = (uint8_t)(menu_history_page * per_page);
+
+    LCD_Fill(0, BOARD_Y_OFF, 239, 305, WHITE);
+    POINT_COLOR = BLACK;
+    BACK_COLOR = WHITE;
+
+    LCD_ShowString(12, 48, 180, 16, 16, (uint8_t *)"EEPROM RECORD");
+    LCD_Fill(12, 68, 226, 70, BLACK);
+
+    POINT_COLOR = GRAY;
+    LCD_ShowString(16, 92, 84, 12, 12, (uint8_t *)"BEST SCORE");
+    LCD_ShowString(16, 122, 84, 12, 12, (uint8_t *)"BEST LINES");
+    LCD_ShowString(16, 152, 84, 12, 12, (uint8_t *)"BGM VOLUME");
+
+    POINT_COLOR = BLACK;
+    LCD_ShowxNum(112, 92, s->high_score, 6, 12, 0x80);
+    LCD_ShowxNum(112, 122, s->high_lines, 5, 12, 0x80);
+    LCD_ShowxNum(112, 152, s->bgm_volume, 2, 12, 0x80);
+
+    POINT_COLOR = BLACK;
+    LCD_ShowString(16, 180, 64, 12, 12, (uint8_t *)"HISTORY");
+    LCD_ShowxNum(94, 180, (uint32_t)menu_history_page + 1U, 1, 12, 0x80);
+    LCD_ShowString(106, 180, 8, 12, 12, (uint8_t *)"/");
+    LCD_ShowxNum(118, 180, pages, 1, 12, 0x80);
+
+    POINT_COLOR = GRAY;
+    if (s->history_count == 0U) {
+        LCD_ShowString(16, 204, 144, 12, 12, (uint8_t *)"NO GAME RECORD");
+    } else {
+        for (uint8_t i = 0; i < per_page; i++) {
+            app_game_history_t rec;
+            uint8_t latest_index = (uint8_t)(start + i);
+            uint16_t y = (uint16_t)(202 + i * 42);
+
+            if (!App_Settings_GetHistory(latest_index, &rec)) {
+                break;
+            }
+
+            LCD_ShowString(16, y, 12, 12, 12, (uint8_t *)"#");
+            LCD_ShowxNum(28, y, (uint32_t)latest_index + 1U, 2, 12, 0x80);
+            LCD_ShowxNum(58, y, rec.started_at.month, 2, 12, 0x80);
+            LCD_ShowString(82, y, 8, 12, 12, (uint8_t *)"/");
+            LCD_ShowxNum(94, y, rec.started_at.day, 2, 12, 0x80);
+            LCD_ShowxNum(130, y, rec.started_at.hour, 2, 12, 0x80);
+            LCD_ShowString(154, y, 8, 12, 12, (uint8_t *)":");
+            LCD_ShowxNum(166, y, rec.started_at.minute, 2, 12, 0x80);
+
+            LCD_ShowString(28, y + 18, 12, 12, 12, (uint8_t *)"S");
+            LCD_ShowxNum(40, y + 18, rec.score, 5, 12, 0x80);
+            LCD_ShowString(100, y + 18, 12, 12, 12, (uint8_t *)"L");
+            LCD_ShowxNum(112, y + 18, rec.lines, 3, 12, 0x80);
+            LCD_ShowString(150, y + 18, 12, 12, 12, (uint8_t *)"T");
+            LCD_ShowxNum(162, y + 18, rec.duration_seconds, 4, 12, 0x80);
+        }
+    }
+
+    POINT_COLOR = LGRAY;
+    LCD_ShowString(16, 292, 208, 12, 12, (uint8_t *)"K1/K2 PAGE  UP BACK");
 }
 
 static void draw_menu_volume(void)
@@ -582,7 +681,7 @@ static void draw_menu_volume(void)
 }
 
 
-/* ---- ghost piece (drop preview) --------------------------------- */
+/* ---- 影子方块，下落位置预览 -------------------------------------- */
 
 static int8_t calc_ghost_y(void)
 
@@ -647,7 +746,7 @@ static void draw_ghost(void)
 }
 
 
-/* ---- game init helpers ------------------------------------------ */
+/* ---- 新游戏初始化 ------------------------------------------------ */
 
 static void start_new_game(void)
 
@@ -659,8 +758,12 @@ static void start_new_game(void)
 
     fall_speed = FALL_SPEED_INIT; game_state = STATE_PLAYING;
     Audio_BGM_Start();
+    Led_Feedback_SetState(LED_FEEDBACK_PLAYING);
 
     last_fall_tick = last_key_tick = HAL_GetTick();
+    game_start_tick = last_fall_tick;
+    /* 记录本局开始时刻，后续写入 EEPROM 历史。 */
+    App_RTC_GetDateTime(&game_start_time);
 
     srand(HAL_GetTick()); next_type = rand() % 7; new_piece();
 
@@ -671,7 +774,7 @@ static void start_new_game(void)
 
 
 /* ==================================================================
- *  Public API
+ *  对外接口
  * ================================================================== */
 
 void tetris_init(void)
@@ -681,6 +784,7 @@ void tetris_init(void)
     draw_start_screen();
     draw_menu_volume();
     Audio_BGM_Start();
+    Led_Feedback_SetState(LED_FEEDBACK_MENU);
     game_state = STATE_MENU;
 }
 
@@ -691,31 +795,74 @@ void tetris_loop(void)
         static uint8_t menu_lock;
         static uint8_t vol_down_lock;
         static uint8_t vol_up_lock;
-        draw_menu_volume();
+        static uint8_t history_lock;
+
+        if (!menu_history_visible) {
+            draw_menu_volume();
+        }
+
+        if (HAL_GPIO_ReadPin(KEY_UP_GPIO_Port, KEY_UP_Pin) == GPIO_PIN_SET) {
+            if (!history_lock) {
+                history_lock = 1;
+                menu_history_visible ^= 1U;
+                if (menu_history_visible) {
+                    menu_history_page = 0;
+                    draw_eeprom_history_screen();
+                } else {
+                    draw_start_screen();
+                    draw_menu_volume();
+                }
+            }
+        } else history_lock = 0;
+
         if (HAL_GPIO_ReadPin(KEY_0_GPIO_Port, KEY_0_Pin) == GPIO_PIN_RESET) {
         if (!menu_lock) { menu_lock = 1; start_new_game(); }
         } else menu_lock = 0;
-        if (HAL_GPIO_ReadPin(KEY_1_GPIO_Port, KEY_1_Pin) == GPIO_PIN_RESET) {
+
+        if (menu_history_visible && HAL_GPIO_ReadPin(KEY_1_GPIO_Port, KEY_1_Pin) == GPIO_PIN_RESET) {
+            if (!vol_down_lock) {
+                vol_down_lock = 1;
+                if (menu_history_page > 0U) {
+                    menu_history_page--;
+                    draw_eeprom_history_screen();
+                }
+            }
+        } else if (!menu_history_visible && HAL_GPIO_ReadPin(KEY_1_GPIO_Port, KEY_1_Pin) == GPIO_PIN_RESET) {
             if (!vol_down_lock) {
                 uint8_t volume = Audio_BGM_GetVolume();
                 vol_down_lock = 1;
                 if (volume > 0) {
                     Audio_BGM_SetVolume(volume - 1);
+                    App_Settings_SetVolume(volume - 1);
                     draw_menu_volume();
                 }
             }
         } else vol_down_lock = 0;
-        if (HAL_GPIO_ReadPin(KEY_2_GPIO_Port, KEY_2_Pin) == GPIO_PIN_RESET) {
+
+        if (menu_history_visible && HAL_GPIO_ReadPin(KEY_2_GPIO_Port, KEY_2_Pin) == GPIO_PIN_RESET) {
+            if (!vol_up_lock) {
+                uint8_t pages = (uint8_t)((App_Settings_Get()->history_count + 1U) / 2U);
+                vol_up_lock = 1;
+                if (pages == 0U) {
+                    pages = 1U;
+                }
+                if ((uint8_t)(menu_history_page + 1U) < pages) {
+                    menu_history_page++;
+                    draw_eeprom_history_screen();
+                }
+            }
+        } else if (!menu_history_visible && HAL_GPIO_ReadPin(KEY_2_GPIO_Port, KEY_2_Pin) == GPIO_PIN_RESET) {
             if (!vol_up_lock) {
                 uint8_t volume = Audio_BGM_GetVolume();
                 vol_up_lock = 1;
                 if (volume < 10) {
                     Audio_BGM_SetVolume(volume + 1);
+                    App_Settings_SetVolume(volume + 1);
                     draw_menu_volume();
                 }
             }
         } else vol_up_lock = 0;
-        /* IR remote start (PLAY button) */
+        /* 红外遥控 PLAY 键也可以开始游戏。 */
         { uint32_t code; if (ir_read_key(&code) && code == 0x00FF02FD) start_new_game(); }
         return;
     }
@@ -729,10 +876,10 @@ void tetris_loop(void)
         return;
     }
 
-    /* 1. key polling */
+    /* 1. 本机按键轮询。 */
     game_key_handler();
 
-    /* 1b. IR remote key polling */
+    /* 1b. 红外遥控按键轮询。 */
     {
         uint32_t code;
         if (ir_read_key(&code)) {
@@ -740,7 +887,7 @@ void tetris_loop(void)
         }
     }
 
-    /* 2. gravity */
+    /* 2. 重力下落。 */
     uint32_t now = HAL_GetTick();
     if (now - last_fall_tick >= fall_speed) {
         last_fall_tick = now;

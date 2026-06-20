@@ -45,9 +45,13 @@ target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
 # Add sources to executable
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
         # Add user sources here
+        Core/Src/app_rtc.c
+        Core/Src/app_settings.c
         Core/Src/audio_bgm.c
         Core/Src/korobeiniki_pcm.c
+        Core/Src/led_feedback.c
         Core/Src/lcd.c
+        Core/Src/spi_flash.c
         Core/Src/tetris.c
 )
 

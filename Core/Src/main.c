@@ -16,47 +16,51 @@
   ******************************************************************************
   */
 /* USER CODE END Header */
-/* Includes ------------------------------------------------------------------*/
+/* 头文件 --------------------------------------------------------------------*/
 #include "main.h"
 #include "tim.h"
 #include "gpio.h"
 #include "fsmc.h"
 
-/* Private includes ----------------------------------------------------------*/
+/* 私有头文件 ----------------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "lcd.h"
 #include "tetris.h"
 #include "audio_bgm.h"
+#include "app_settings.h"
+#include "app_rtc.h"
+#include "led_feedback.h"
+#include "spi_flash.h"
 /* USER CODE END Includes */
 
-/* Private typedef -----------------------------------------------------------*/
+/* 私有类型定义 --------------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
 
 /* USER CODE END PTD */
 
-/* Private define ------------------------------------------------------------*/
+/* 私有宏定义 ----------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 
 /* USER CODE END PD */
 
-/* Private macro -------------------------------------------------------------*/
+/* 私有宏 --------------------------------------------------------------------*/
 /* USER CODE BEGIN PM */
 
 /* USER CODE END PM */
 
-/* Private variables ---------------------------------------------------------*/
+/* 私有变量 ------------------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
 
 /* USER CODE END PV */
 
-/* Private function prototypes -----------------------------------------------*/
+/* 私有函数声明 --------------------------------------------------------------*/
 void SystemClock_Config(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
 
-/* Private user code ---------------------------------------------------------*/
+/* 用户代码 ------------------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 
 /* USER CODE END 0 */
@@ -72,23 +76,23 @@ int main(void)
 
   /* USER CODE END 1 */
 
-  /* MCU Configuration--------------------------------------------------------*/
+  /* MCU 基础配置 ------------------------------------------------------------*/
 
-  /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
+  /* 复位外设并初始化 Flash 接口和 SysTick。 */
   HAL_Init();
 
   /* USER CODE BEGIN Init */
 
   /* USER CODE END Init */
 
-  /* Configure the system clock */
+  /* 配置系统时钟。 */
   SystemClock_Config();
 
   /* USER CODE BEGIN SysInit */
 
   /* USER CODE END SysInit */
 
-  /* Initialize all configured peripherals */
+  /* 初始化 CubeMX 配置的外设。 */
   MX_GPIO_Init();
   MX_FSMC_Init();
   MX_TIM3_Init();
@@ -96,21 +100,32 @@ int main(void)
   /* USER CODE BEGIN 2 */
   HAL_TIM_Base_Start(&htim3);
   /* PA8 红外接收头 - 配置 EXTI 双沿中断 */
-  /* TIM1 Ch1 input capture -- IR NEC decode */
+  /* TIM1_CH1 用于红外 NEC 协议输入捕获，更新中断用于超时判定。 */
   HAL_TIM_IC_Start_IT(&htim1, TIM_CHANNEL_1);
   __HAL_TIM_ENABLE_IT(&htim1, TIM_IT_UPDATE);
+  /* 项目功能模块初始化顺序：
+   * LED/SPI FLASH/音频先准备硬件，RTC 提供时间，EEPROM 再读取设置。
+   */
+  Led_Feedback_Init();
+  SpiFlash_Init();
   Audio_BGM_Init();
+  App_RTC_Init();
+  App_Settings_Init();
+  Audio_BGM_SetVolume(App_Settings_Get()->bgm_volume);
+  /* Tetris 初始化会绘制开始菜单，并按 EEPROM 中的音量设置播放 BGM。 */
   tetris_init();
   /* USER CODE END 2 */
 
-  /* Infinite loop */
+  /* 主循环。 */
   /* USER CODE BEGIN WHILE */
   while (1)
   {
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+    /* 三个任务都设计为非阻塞轮询，避免影响按键响应和游戏下落节奏。 */
     Audio_BGM_Task();
+    Led_Feedback_Task();
     tetris_loop();
   }
   /* USER CODE END 3 */
@@ -125,13 +140,12 @@ void SystemClock_Config(void)
   RCC_OscInitTypeDef RCC_OscInitStruct = {0};
   RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
 
-  /** Configure the main internal regulator output voltage
+  /** 配置内部主稳压器输出电压。
   */
   __HAL_RCC_PWR_CLK_ENABLE();
   __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE1);
 
-  /** Initializes the RCC Oscillators according to the specified parameters
-  * in the RCC_OscInitTypeDef structure.
+  /** 按 RCC_OscInitTypeDef 参数初始化 RCC 振荡器。
   */
   RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
   RCC_OscInitStruct.HSIState = RCC_HSI_ON;
@@ -147,7 +161,7 @@ void SystemClock_Config(void)
     Error_Handler();
   }
 
-  /** Initializes the CPU, AHB and APB buses clocks
+  /** 初始化 CPU、AHB 和 APB 总线时钟。
   */
   RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
                               |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
@@ -173,7 +187,7 @@ void SystemClock_Config(void)
 void Error_Handler(void)
 {
   /* USER CODE BEGIN Error_Handler_Debug */
-  /* User can add his own implementation to report the HAL error return state */
+  /* 发生 HAL 错误时停在这里，便于调试定位。 */
   __disable_irq();
   while (1)
   {
@@ -191,8 +205,7 @@ void Error_Handler(void)
 void assert_failed(uint8_t *file, uint32_t line)
 {
   /* USER CODE BEGIN 6 */
-  /* User can add his own implementation to report the file name and line number,
-     ex: printf("Wrong parameters value: file %s on line %d\r\n", file, line) */
+  /* 断言失败时可在这里输出文件名和行号。 */
   /* USER CODE END 6 */
 }
 #endif /* USE_FULL_ASSERT */
