@@ -1,6 +1,9 @@
-#include "tetris.h"
+﻿#include "tetris.h"
 #include <stdlib.h>
 #include <string.h>
+/* IR decoder externs (from stm32f4xx_it.c) */
+extern volatile uint8_t  ir_ready;
+extern volatile uint32_t ir_code;
 
 /* ===================================================================
  *  Shape data  (tinytetris-compatible 4x4 bitmaps)
@@ -16,7 +19,7 @@ const uint16_t shapes[7][4] = {
     /* O */ { 0x0660, 0x0660, 0x0660, 0x0660 },
 };
 
-/* colour index: 0=empty, 1=I … 7=O */
+/* colour index: 0=empty, 1=I 鈥?7=O */
 const uint16_t COLOR_MAP[8] = {
     WHITE,   /* 0 background */
     CYAN,    /* 1 I */
@@ -24,7 +27,7 @@ const uint16_t COLOR_MAP[8] = {
     GREEN,   /* 3 S */
     RED,     /* 4 Z */
     BLUE,    /* 5 J */
-    BRRED,   /* 6 L  (brown-red ≈ orange) */
+    BRRED,   /* 6 L  (brown-red 鈮?orange) */
     YELLOW,  /* 7 O */
 };
 
@@ -36,7 +39,12 @@ static int8_t   piece_x, piece_y;                 /* grid coords (top-left of 4x
 static uint32_t score, lines_total, level;
 static uint32_t fall_speed;                       /* ms per gravity tick */
 static uint32_t last_fall_tick, last_key_tick;
-static uint8_t  game_over;
+static uint8_t  game_state;
+static int8_t   ghost_y;
+
+#define STATE_MENU       0
+#define STATE_PLAYING    1
+#define STATE_GAME_OVER  2
 
 /* ---- helpers ----------------------------------------------------- */
 static inline uint16_t shape_word(int type, int rot)
@@ -225,7 +233,7 @@ static void new_piece(void)
     piece_y    = 0;
 
     if (check_hit(piece_x, piece_y, piece_rot)) {
-        game_over = 1;
+        game_state = STATE_GAME_OVER;
         return;
     }
 
@@ -241,6 +249,10 @@ static void beep_short(void)
     HAL_GPIO_WritePin(BEEP_GPIO_Port, BEEP_Pin, GPIO_PIN_RESET);
 }
 
+/* forward decl for ghost functions used in key handler */
+static void erase_ghost(void);
+static void draw_ghost(void);
+
 /* ---- key handler (non-blocking, 20 ms debounce) ------------------ */
 
 static void game_key_handler(void)
@@ -251,36 +263,41 @@ static void game_key_handler(void)
 
     static uint8_t k0_lock, k1_lock, k2_lock, kup_lock;
 
-    /* KEY0 (PE4, active-low) → move left */
+    /* KEY0 (PE4, active-low) 鈫?move left */
     if (HAL_GPIO_ReadPin(KEY_2_GPIO_Port, KEY_2_Pin) == GPIO_PIN_RESET) {
         if (!k0_lock) {
             k0_lock = 1;
             if (!check_hit(piece_x - 1, piece_y, piece_rot)) {
+                erase_ghost();
                 erase_piece();
                 piece_x--;
                 draw_piece();
+                draw_ghost();
             }
         }
     } else k0_lock = 0;
 
-    /* KEY2 (PE2, active-low) → move right */
+    /* KEY2 (PE2, active-low) 鈫?move right */
     if (HAL_GPIO_ReadPin(KEY_0_GPIO_Port, KEY_0_Pin) == GPIO_PIN_RESET) {
         if (!k2_lock) {
             k2_lock = 1;
             if (!check_hit(piece_x + 1, piece_y, piece_rot)) {
+                erase_ghost();
                 erase_piece();
                 piece_x++;
                 draw_piece();
+                draw_ghost();
             }
         }
     } else k2_lock = 0;
 
-    /* KEY1 (PE3, active-low) → rotate */
+    /* KEY1 (PE3, active-low) 鈫?rotate */
     if (HAL_GPIO_ReadPin(KEY_UP_GPIO_Port, KEY_UP_Pin) == GPIO_PIN_RESET) {
         if (!k1_lock) {
             k1_lock = 1;
 
             /* Erase the OLD position first (uses current piece_rot) */
+            erase_ghost();
             erase_piece();
 
             int new_rot = (piece_rot + 1) & 3;
@@ -311,13 +328,15 @@ static void game_key_handler(void)
             }
 
             draw_piece();
+            draw_ghost();
         }
     } else k1_lock = 0;
 
-   /* WK_UP (PA0, active-high) → hard drop */
+   /* WK_UP (PA0, active-high) 鈫?hard drop */
     if (HAL_GPIO_ReadPin(KEY_1_GPIO_Port, KEY_1_Pin) == GPIO_PIN_RESET) {
         if (!kup_lock) {
             kup_lock = 1;
+            erase_ghost();
             erase_piece();
             while (!check_hit(piece_x, piece_y + 1, piece_rot))
                 piece_y++;
@@ -327,7 +346,7 @@ static void game_key_handler(void)
             draw_board_full();     /* redraw after line shift */
             beep_short();
             new_piece();
-            if (!game_over) draw_piece();
+            if (game_state == STATE_PLAYING) { draw_piece(); draw_ghost(); }
         }
     } else kup_lock = 0;
 }
@@ -400,6 +419,224 @@ static void draw_static_ui(void)
     POINT_COLOR = LGRAY;
     LCD_ShowString(20, 770, 300, 12, 12, (uint8_t *)"arorms.cn  STM32F407");
 }
+/* forward declarations for ghost functions used by ir_do_action */
+
+static void erase_ghost(void);
+
+static void draw_ghost(void);
+
+
+/* ---- IR remote key polling -------------------------------------- */
+
+static uint8_t ir_read_key(uint32_t *code)
+
+{
+
+    uint8_t ret = 0;
+
+    __disable_irq();
+
+    if (ir_ready) { ir_ready = 0; *code = ir_code; ret = 1; }
+
+    __enable_irq();
+
+    return ret;
+
+}
+
+static void ir_do_action(uint32_t code)
+
+{
+
+    switch (code) {
+
+    case 0x00FF22DD:
+
+        if (!check_hit(piece_x - 1, piece_y, piece_rot))
+
+            { erase_ghost(); erase_piece(); piece_x--; draw_piece(); draw_ghost(); } break;
+
+    case 0x00FFC23D:
+
+        if (!check_hit(piece_x + 1, piece_y, piece_rot))
+
+            { erase_ghost(); erase_piece(); piece_x++; draw_piece(); draw_ghost(); } break;
+
+    case 0x00FF629D:
+
+        { erase_ghost(); erase_piece();
+
+          int nr = (piece_rot + 1) & 3, nx = piece_x;
+
+          while (nx + rightmost_col(piece_type, nr) >= BOARD_COLS) nx--;
+
+          if (check_hit(nx, piece_y, nr)) {
+
+              for (int k = 1; k <= 2; k++)
+
+                  if (!check_hit(nx+k, piece_y, nr)) { nx += k; break; }
+
+              if (check_hit(nx, piece_y, nr)) { nr = piece_rot; nx = piece_x; }
+
+          }
+
+          piece_rot = nr; piece_x = nx; draw_piece(); draw_ghost();
+
+        } break;
+
+    case 0x00FF02FD:
+
+        { erase_ghost(); erase_piece();
+
+          while (!check_hit(piece_x, piece_y + 1, piece_rot)) piece_y++;
+
+          merge_piece(); draw_board_full(); remove_lines(); draw_board_full(); beep_short();
+
+          new_piece();
+
+          if (game_state == STATE_PLAYING) { draw_piece(); draw_ghost(); }
+
+          else { show_game_over(); }
+
+        } break;
+
+    }
+
+}
+
+
+/* ---- start screen ----------------------------------------------- */
+
+static void draw_start_screen(void)
+
+{
+
+    uint16_t bw = BOARD_COLS * BLOCK_SIZE;
+
+    LCD_Fill(BOARD_X_OFF, BOARD_Y_OFF,
+
+             BOARD_X_OFF + bw - 1,
+
+             BOARD_Y_OFF + BOARD_ROWS * BLOCK_SIZE - 1, WHITE);
+
+    static const uint16_t bar_c[] = { CYAN, MAGENTA, GREEN, YELLOW, RED, BLUE, BRRED, CYAN };
+
+    for (int i = 0; i < 8; i++)
+
+        LCD_Fill(BOARD_X_OFF + i * 40, 46, BOARD_X_OFF + i * 40 + 38, 70, bar_c[i]);
+
+    POINT_COLOR = BLACK; BACK_COLOR = WHITE;
+
+    LCD_ShowString(BOARD_X_OFF + 25, 115, 300, 32, 32, (uint8_t *)"T  E  T  R  I  S");
+
+    LCD_Fill(BOARD_X_OFF + 25, 155, BOARD_X_OFF + 295, 157, BLACK);
+
+    POINT_COLOR = LGRAY;
+
+    LCD_ShowString(BOARD_X_OFF + 35, 195, 200, 16, 16, (uint8_t *)"K0 / K2     Move");
+
+    LCD_ShowString(BOARD_X_OFF + 35, 220, 200, 16, 16, (uint8_t *)"K1          Rotate");
+
+    LCD_ShowString(BOARD_X_OFF + 35, 245, 200, 16, 16, (uint8_t *)"KUP         Drop");
+
+    POINT_COLOR = WHITE; BACK_COLOR = BLACK;
+
+    LCD_Fill(BOARD_X_OFF + 30, 340, BOARD_X_OFF + bw - 30, 380, BLACK);
+
+    LCD_ShowString(BOARD_X_OFF + 40, 345, 280, 24, 24, (uint8_t *)"PRESS  KEY0");
+
+    POINT_COLOR = LGRAY; BACK_COLOR = WHITE;
+
+    LCD_ShowString(BOARD_X_OFF + 95, 400, 200, 16, 16, (uint8_t *)"to start");
+
+}
+
+
+/* ---- ghost piece (drop preview) --------------------------------- */
+
+static int8_t calc_ghost_y(void)
+
+{
+
+    int8_t gy = piece_y;
+
+    while (!check_hit(piece_x, gy + 1, piece_rot)) gy++;
+
+    return gy;
+
+}
+
+static void erase_ghost(void)
+
+{
+
+    for (int j = 0; j < 4; j++) for (int i = 0; i < 4; i++)
+
+        if (cell_set(piece_type, piece_rot, i, j)) {
+
+            int bx = piece_x + i, by = ghost_y + j;
+
+            if (bx >= 0 && bx < BOARD_COLS && by >= 0 && by < BOARD_ROWS)
+
+                draw_block(bx, by, board[by][bx]);
+
+        }
+
+}
+
+static void draw_ghost(void)
+
+{
+
+    ghost_y = calc_ghost_y();
+
+    if (ghost_y == piece_y) return;
+
+    for (int j = 0; j < 4; j++) for (int i = 0; i < 4; i++)
+
+        if (cell_set(piece_type, piece_rot, i, j)) {
+
+            int bx = piece_x + i, by = ghost_y + j;
+
+            if (bx >= 0 && bx < BOARD_COLS && by >= 0 && by < BOARD_ROWS) {
+
+                uint16_t px1 = BOARD_X_OFF + bx * BLOCK_SIZE;
+
+                uint16_t py1 = BOARD_Y_OFF + by * BLOCK_SIZE;
+
+                uint16_t px2 = px1 + BLOCK_SIZE - 1, py2 = py1 + BLOCK_SIZE - 1;
+
+                POINT_COLOR = COLOR_MAP[piece_type + 1];
+
+                LCD_DrawRectangle(px1 + 2, py1 + 2, px2 - 2, py2 - 2);
+
+            }
+
+        }
+
+}
+
+
+/* ---- game init helpers ------------------------------------------ */
+
+static void start_new_game(void)
+
+{
+
+    memset(board, 0, sizeof(board));
+
+    score = 0; lines_total = 0; level = 0;
+
+    fall_speed = FALL_SPEED_INIT; game_state = STATE_PLAYING;
+
+    last_fall_tick = last_key_tick = HAL_GetTick();
+
+    srand(HAL_GetTick()); next_type = rand() % 7; new_piece();
+
+    draw_board_full(); draw_piece(); draw_ghost(); draw_score_panel();
+
+}
+
 
 /* ==================================================================
  *  Public API
@@ -408,41 +645,43 @@ static void draw_static_ui(void)
 void tetris_init(void)
 {
     draw_static_ui();
-
-    memset(board, 0, sizeof(board));
-    score       = 0;
-    lines_total = 0;
-    level       = 0;
-    fall_speed  = FALL_SPEED_INIT;
-    game_over   = 0;
-    last_fall_tick = HAL_GetTick();
-    last_key_tick  = HAL_GetTick();
-
-    srand(HAL_GetTick());
-    next_type = rand() % 7;
-    new_piece();
-
-    draw_board_full();
-    draw_piece();
-    draw_score_panel();
+    BACK_COLOR = WHITE;
+    draw_start_screen();
+    game_state = STATE_MENU;
 }
+
 
 void tetris_loop(void)
 {
-    if (game_over) {
-        /* restart on KEY0 press */
+    if (game_state == STATE_MENU) {
+        static uint8_t menu_lock;
+        if (HAL_GPIO_ReadPin(KEY_0_GPIO_Port, KEY_0_Pin) == GPIO_PIN_RESET) {
+        if (!menu_lock) { menu_lock = 1; start_new_game(); }
+        } else menu_lock = 0;
+        /* IR remote start (PLAY button) */
+        { uint32_t code; if (ir_read_key(&code) && code == 0x00FF02FD) start_new_game(); }
+        return;
+    }
+
+    if (game_state == STATE_GAME_OVER) {
         static uint8_t restart_lock;
         if (HAL_GPIO_ReadPin(KEY_0_GPIO_Port, KEY_0_Pin) == GPIO_PIN_RESET) {
-            if (!restart_lock) {
-                restart_lock = 1;
-                tetris_init();
-            }
+            if (!restart_lock) { restart_lock = 1; start_new_game(); }
         } else restart_lock = 0;
+        { uint32_t code; if (ir_read_key(&code) && code == 0x00FF02FD) start_new_game(); }
         return;
     }
 
     /* 1. key polling */
     game_key_handler();
+
+    /* 1b. IR remote key polling */
+    {
+        uint32_t code;
+        if (ir_read_key(&code)) {
+            ir_do_action(code);
+        }
+    }
 
     /* 2. gravity */
     uint32_t now = HAL_GetTick();
@@ -450,20 +689,11 @@ void tetris_loop(void)
         last_fall_tick = now;
 
         if (check_hit(piece_x, piece_y + 1, piece_rot)) {
-            /* piece has landed */
-            merge_piece();
-            remove_lines();
-            draw_board_full();
-            new_piece();
-            if (!game_over) {
-                draw_piece();
-            } else {
-                show_game_over();
-            }
+            merge_piece(); remove_lines(); draw_board_full(); new_piece();
+            if (game_state == STATE_PLAYING) { draw_piece(); draw_ghost(); }
+            else { show_game_over(); }
         } else {
-            erase_piece();
-            piece_y++;
-            draw_piece();
+            erase_ghost(); erase_piece(); piece_y++; draw_piece(); draw_ghost();
         }
     }
 }

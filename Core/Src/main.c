@@ -91,7 +91,13 @@ int main(void)
   MX_GPIO_Init();
   MX_FSMC_Init();
   MX_TIM3_Init();
+  MX_TIM1_Init();
   /* USER CODE BEGIN 2 */
+  HAL_TIM_Base_Start(&htim3);
+  /* PA8 红外接收头 - 配置 EXTI 双沿中断 */
+  /* TIM1 Ch1 input capture -- IR NEC decode */
+  HAL_TIM_IC_Start_IT(&htim1, TIM_CHANNEL_1);
+  __HAL_TIM_ENABLE_IT(&htim1, TIM_IT_UPDATE);
   tetris_init();
   /* USER CODE END 2 */
 

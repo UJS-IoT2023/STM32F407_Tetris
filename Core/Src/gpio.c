@@ -88,5 +88,5 @@ void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 2 */
-
+/* IR init moved to main.c */
 /* USER CODE END 2 */
