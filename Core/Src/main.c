@@ -26,6 +26,7 @@
 /* USER CODE BEGIN Includes */
 #include "lcd.h"
 #include "tetris.h"
+#include "audio_bgm.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -98,6 +99,7 @@ int main(void)
   /* TIM1 Ch1 input capture -- IR NEC decode */
   HAL_TIM_IC_Start_IT(&htim1, TIM_CHANNEL_1);
   __HAL_TIM_ENABLE_IT(&htim1, TIM_IT_UPDATE);
+  Audio_BGM_Init();
   tetris_init();
   /* USER CODE END 2 */
 
@@ -108,6 +110,7 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+    Audio_BGM_Task();
     tetris_loop();
   }
   /* USER CODE END 3 */

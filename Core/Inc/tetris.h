@@ -7,18 +7,18 @@
 /* ---- Board geometry ---- */
 #define BOARD_COLS   10
 #define BOARD_ROWS   20
-#define BLOCK_SIZE   32
-#define BOARD_X_OFF  20
-#define BOARD_Y_OFF  40
+#define BLOCK_SIZE   12
+#define BOARD_X_OFF  8
+#define BOARD_Y_OFF  34
 
 /* ---- Right-side panel layout ---- */
-#define PANEL_X      360
-#define NEXT_Y       80
-#define NEXT_SIZE    20          /* small block size for next-piece preview */
-#define SCORE_Y      220
-#define LINES_Y      280
-#define LEVEL_Y      340
-#define CTRL_Y       520
+#define PANEL_X      148
+#define NEXT_Y       54
+#define NEXT_SIZE    12          /* small block size for next-piece preview */
+#define SCORE_Y      128
+#define LINES_Y      170
+#define LEVEL_Y      212
+#define CTRL_Y       264
 
 /* ---- Game timing (milliseconds) ---- */
 #define KEY_DEBOUNCE  20

@@ -1,4 +1,5 @@
 ﻿#include "tetris.h"
+#include "audio_bgm.h"
 #include <stdlib.h>
 #include <string.h>
 /* IR decoder externs (from stm32f4xx_it.c) */
@@ -41,6 +42,7 @@ static uint32_t fall_speed;                       /* ms per gravity tick */
 static uint32_t last_fall_tick, last_key_tick;
 static uint8_t  game_state;
 static int8_t   ghost_y;
+static uint8_t  menu_volume_drawn = 0xFF;
 
 #define STATE_MENU       0
 #define STATE_PLAYING    1
@@ -148,9 +150,12 @@ static void draw_score_panel(void)
 {
     POINT_COLOR = BLACK;
     BACK_COLOR  = WHITE;
-    LCD_ShowxNum(PANEL_X, SCORE_Y, score,       6, 16, 0x80);
-    LCD_ShowxNum(PANEL_X, LINES_Y, lines_total,  6, 16, 0x80);
-    LCD_ShowxNum(PANEL_X, LEVEL_Y, level,         2, 16, 0x80);
+    LCD_Fill(PANEL_X, SCORE_Y, PANEL_X + 70, SCORE_Y + 12, WHITE);
+    LCD_Fill(PANEL_X, LINES_Y, PANEL_X + 70, LINES_Y + 12, WHITE);
+    LCD_Fill(PANEL_X, LEVEL_Y, PANEL_X + 32, LEVEL_Y + 12, WHITE);
+    LCD_ShowxNum(PANEL_X, SCORE_Y, score,       5, 12, 0x80);
+    LCD_ShowxNum(PANEL_X, LINES_Y, lines_total, 4, 12, 0x80);
+    LCD_ShowxNum(PANEL_X, LEVEL_Y, level,       2, 12, 0x80);
 }
 
 /* ---- collision detection ----------------------------------------- */
@@ -355,24 +360,23 @@ static void game_key_handler(void)
 
 static void show_game_over(void)
 {
-    /* fill the entire board area with white */
-    LCD_Fill(BOARD_X_OFF, BOARD_Y_OFF,
-             BOARD_X_OFF + BOARD_COLS * BLOCK_SIZE - 1,
-             BOARD_Y_OFF + BOARD_ROWS * BLOCK_SIZE - 1, WHITE);
+    Audio_BGM_Stop();
+    LCD_Fill(BOARD_X_OFF + 4, BOARD_Y_OFF + 52,
+             BOARD_X_OFF + BOARD_COLS * BLOCK_SIZE - 5,
+             BOARD_Y_OFF + 184, WHITE);
     POINT_COLOR = BLACK;
     BACK_COLOR  = WHITE;
-    LCD_ShowString(BOARD_X_OFF + 30, 120, 300, 24, 24,
-                   (uint8_t *)"GAME  OVER");
-    POINT_COLOR = BLACK;
-    LCD_ShowString(BOARD_X_OFF + 15, 180, 120, 16, 16, (uint8_t *)"SCORE");
-    LCD_ShowxNum(BOARD_X_OFF + 80, 180, score, 6, 16, 0x80);
-    LCD_ShowString(BOARD_X_OFF + 15, 210, 120, 16, 16, (uint8_t *)"LINES");
-    LCD_ShowxNum(BOARD_X_OFF + 80, 210, lines_total, 6, 16, 0x80);
-    LCD_ShowString(BOARD_X_OFF + 15, 240, 120, 16, 16, (uint8_t *)"LEVEL");
-    LCD_ShowxNum(BOARD_X_OFF + 80, 240, level, 2, 16, 0x80);
+    LCD_ShowString(BOARD_X_OFF + 10, BOARD_Y_OFF + 62, 120, 24, 24,
+                   (uint8_t *)"GAME");
+    LCD_ShowString(BOARD_X_OFF + 10, BOARD_Y_OFF + 92, 120, 24, 24,
+                   (uint8_t *)"OVER");
+    LCD_ShowString(BOARD_X_OFF + 12, BOARD_Y_OFF + 132, 72, 12, 12, (uint8_t *)"SCORE");
+    LCD_ShowxNum(BOARD_X_OFF + 54, BOARD_Y_OFF + 132, score, 5, 12, 0x80);
+    LCD_ShowString(BOARD_X_OFF + 12, BOARD_Y_OFF + 150, 72, 12, 12, (uint8_t *)"LINES");
+    LCD_ShowxNum(BOARD_X_OFF + 54, BOARD_Y_OFF + 150, lines_total, 4, 12, 0x80);
     POINT_COLOR = GRAY;
-    LCD_ShowString(BOARD_X_OFF + 30, 320, 300, 16, 16,
-                   (uint8_t *)"Press KEY0");
+    LCD_ShowString(BOARD_X_OFF + 20, BOARD_Y_OFF + 172, 96, 12, 12,
+                   (uint8_t *)"KEY0 START");
 }
 
 /* ---- static UI (Swiss-style) ------------------------------------ */
@@ -380,16 +384,16 @@ static void show_game_over(void)
 static void draw_static_ui(void)
 {
     LCD_Init();
-    LCD_Display_Dir(0);   /* portrait 480 x 800 */
+    LCD_Display_Dir(0);   /* portrait 240 x 320 */
     LCD_Clear(WHITE);
     BACK_COLOR  = WHITE;
 
     /* header */
     POINT_COLOR = BLACK;
-    LCD_ShowString(20, 10, 200, 24, 24, (uint8_t *)"T E T R I S");
+    LCD_ShowString(8, 8, 140, 16, 16, (uint8_t *)"TETRIS");
 
     /* thick divider line */
-    LCD_Fill(20, 35, 460, 38, BLACK);
+    LCD_Fill(8, 27, 232, 29, BLACK);
 
     /* board border */
     LCD_DrawRectangle(BOARD_X_OFF - 1, BOARD_Y_OFF - 1,
@@ -398,26 +402,26 @@ static void draw_static_ui(void)
 
     /* right panel labels */
     POINT_COLOR = GRAY;
-    LCD_ShowString(PANEL_X, NEXT_Y - 20, 80, 16, 16, (uint8_t *)"NEXT");
+    LCD_ShowString(PANEL_X, NEXT_Y - 16, 56, 12, 12, (uint8_t *)"NEXT");
     LCD_DrawRectangle(PANEL_X - 1, NEXT_Y - 1,
                       PANEL_X + 4 * NEXT_SIZE,
                       NEXT_Y  + 4 * NEXT_SIZE);
 
     POINT_COLOR = BLACK;
-    LCD_ShowString(PANEL_X, SCORE_Y - 20, 80, 16, 16, (uint8_t *)"SCORE");
-    LCD_ShowString(PANEL_X, LINES_Y - 20, 80, 16, 16, (uint8_t *)"LINES");
-    LCD_ShowString(PANEL_X, LEVEL_Y - 20, 80, 16, 16, (uint8_t *)"LEVEL");
+    LCD_ShowString(PANEL_X, SCORE_Y - 14, 56, 12, 12, (uint8_t *)"SCORE");
+    LCD_ShowString(PANEL_X, LINES_Y - 14, 56, 12, 12, (uint8_t *)"LINES");
+    LCD_ShowString(PANEL_X, LEVEL_Y - 14, 56, 12, 12, (uint8_t *)"LEVEL");
 
     POINT_COLOR = LGRAY;
-    LCD_ShowString(PANEL_X, CTRL_Y,      100, 12, 12, (uint8_t *)"K0:  LEFT");
-    LCD_ShowString(PANEL_X, CTRL_Y + 16, 100, 12, 12, (uint8_t *)"K2:  RIGHT");
-    LCD_ShowString(PANEL_X, CTRL_Y + 32, 100, 12, 12, (uint8_t *)"K1:  ROTATE");
-    LCD_ShowString(PANEL_X, CTRL_Y + 48, 100, 12, 12, (uint8_t *)"KUP: DROP");
+    LCD_ShowString(8, CTRL_Y,      88, 12, 12, (uint8_t *)"K0 LEFT");
+    LCD_ShowString(8, CTRL_Y + 14, 88, 12, 12, (uint8_t *)"K2 RIGHT");
+    LCD_ShowString(8, CTRL_Y + 28, 88, 12, 12, (uint8_t *)"K1 ROT");
+    LCD_ShowString(8, CTRL_Y + 42, 88, 12, 12, (uint8_t *)"UP DROP");
 
     /* footer divider */
-    LCD_Fill(20, 760, 460, 763, BLACK);
+    LCD_Fill(8, 306, 232, 307, BLACK);
     POINT_COLOR = LGRAY;
-    LCD_ShowString(20, 770, 300, 12, 12, (uint8_t *)"arorms.cn  STM32F407");
+    LCD_ShowString(8, 309, 144, 12, 12, (uint8_t *)"STM32F407");
 }
 /* forward declarations for ghost functions used by ir_do_action */
 
@@ -511,44 +515,70 @@ static void draw_start_screen(void)
 
 {
 
-    uint16_t bw = BOARD_COLS * BLOCK_SIZE;
+    static const uint16_t bar_c[] = { CYAN, MAGENTA, GREEN, YELLOW, RED, BLUE };
 
-    LCD_Fill(BOARD_X_OFF, BOARD_Y_OFF,
+    LCD_Fill(0, BOARD_Y_OFF, 239, 305, WHITE);
 
-             BOARD_X_OFF + bw - 1,
-
-             BOARD_Y_OFF + BOARD_ROWS * BLOCK_SIZE - 1, WHITE);
-
-    static const uint16_t bar_c[] = { CYAN, MAGENTA, GREEN, YELLOW, RED, BLUE, BRRED, CYAN };
-
-    for (int i = 0; i < 8; i++)
-
-        LCD_Fill(BOARD_X_OFF + i * 40, 46, BOARD_X_OFF + i * 40 + 38, 70, bar_c[i]);
+    for (int i = 0; i < 6; i++) {
+        LCD_Fill(12 + i * 18, 48, 26 + i * 18, 62, bar_c[i]);
+    }
 
     POINT_COLOR = BLACK; BACK_COLOR = WHITE;
 
-    LCD_ShowString(BOARD_X_OFF + 25, 115, 300, 32, 32, (uint8_t *)"T  E  T  R  I  S");
+    LCD_ShowString(14, 82, 112, 24, 24, (uint8_t *)"TETRIS");
 
-    LCD_Fill(BOARD_X_OFF + 25, 155, BOARD_X_OFF + 295, 157, BLACK);
+    LCD_Fill(14, 112, 122, 114, BLACK);
 
     POINT_COLOR = LGRAY;
 
-    LCD_ShowString(BOARD_X_OFF + 35, 195, 200, 16, 16, (uint8_t *)"K0 / K2     Move");
+    LCD_ShowString(14, 132, 100, 12, 12, (uint8_t *)"KEY0 START");
 
-    LCD_ShowString(BOARD_X_OFF + 35, 220, 200, 16, 16, (uint8_t *)"K1          Rotate");
+    LCD_ShowString(14, 150, 100, 12, 12, (uint8_t *)"KEY1 VOL-");
 
-    LCD_ShowString(BOARD_X_OFF + 35, 245, 200, 16, 16, (uint8_t *)"KUP         Drop");
+    LCD_ShowString(14, 168, 100, 12, 12, (uint8_t *)"KEY2 VOL+");
+
+    POINT_COLOR = BLACK; BACK_COLOR = WHITE;
+
+    LCD_ShowString(14, 198, 72, 12, 12, (uint8_t *)"BGM VOL");
+
+    POINT_COLOR = GRAY;
+    LCD_DrawRectangle(142, 48, 226, 206);
+    LCD_ShowString(152, 60, 64, 12, 12, (uint8_t *)"GAME KEY");
+    LCD_Fill(152, 76, 216, 77, LGRAY);
+    LCD_ShowString(152, 96, 64, 12, 12, (uint8_t *)"K0 LEFT");
+    LCD_ShowString(152, 116, 72, 12, 12, (uint8_t *)"K2 RIGHT");
+    LCD_ShowString(152, 136, 64, 12, 12, (uint8_t *)"K1 ROT");
+    LCD_ShowString(152, 156, 64, 12, 12, (uint8_t *)"UP DROP");
 
     POINT_COLOR = WHITE; BACK_COLOR = BLACK;
 
-    LCD_Fill(BOARD_X_OFF + 30, 340, BOARD_X_OFF + bw - 30, 380, BLACK);
+    LCD_Fill(14, 248, 122, 278, BLACK);
 
-    LCD_ShowString(BOARD_X_OFF + 40, 345, 280, 24, 24, (uint8_t *)"PRESS  KEY0");
+    LCD_ShowString(28, 257, 96, 12, 12, (uint8_t *)"PRESS KEY0");
 
     POINT_COLOR = LGRAY; BACK_COLOR = WHITE;
 
-    LCD_ShowString(BOARD_X_OFF + 95, 400, 200, 16, 16, (uint8_t *)"to start");
+    menu_volume_drawn = 0xFF;
 
+}
+
+static void draw_menu_volume(void)
+{
+    uint8_t volume = Audio_BGM_GetVolume();
+    uint16_t x = 14;
+    uint16_t y = 214;
+
+    if (menu_volume_drawn == volume) {
+        return;
+    }
+
+    menu_volume_drawn = volume;
+    LCD_Fill(x, y, x + 106, y + 8, WHITE);
+
+    for (uint8_t i = 0; i < 10; i++) {
+        uint16_t color = (i < volume) ? GREEN : LGRAY;
+        LCD_Fill(x + i * 10, y, x + i * 10 + 7, y + 7, color);
+    }
 }
 
 
@@ -628,11 +658,13 @@ static void start_new_game(void)
     score = 0; lines_total = 0; level = 0;
 
     fall_speed = FALL_SPEED_INIT; game_state = STATE_PLAYING;
+    Audio_BGM_Start();
 
     last_fall_tick = last_key_tick = HAL_GetTick();
 
     srand(HAL_GetTick()); next_type = rand() % 7; new_piece();
 
+    draw_static_ui();
     draw_board_full(); draw_piece(); draw_ghost(); draw_score_panel();
 
 }
@@ -647,6 +679,8 @@ void tetris_init(void)
     draw_static_ui();
     BACK_COLOR = WHITE;
     draw_start_screen();
+    draw_menu_volume();
+    Audio_BGM_Start();
     game_state = STATE_MENU;
 }
 
@@ -655,9 +689,32 @@ void tetris_loop(void)
 {
     if (game_state == STATE_MENU) {
         static uint8_t menu_lock;
+        static uint8_t vol_down_lock;
+        static uint8_t vol_up_lock;
+        draw_menu_volume();
         if (HAL_GPIO_ReadPin(KEY_0_GPIO_Port, KEY_0_Pin) == GPIO_PIN_RESET) {
         if (!menu_lock) { menu_lock = 1; start_new_game(); }
         } else menu_lock = 0;
+        if (HAL_GPIO_ReadPin(KEY_1_GPIO_Port, KEY_1_Pin) == GPIO_PIN_RESET) {
+            if (!vol_down_lock) {
+                uint8_t volume = Audio_BGM_GetVolume();
+                vol_down_lock = 1;
+                if (volume > 0) {
+                    Audio_BGM_SetVolume(volume - 1);
+                    draw_menu_volume();
+                }
+            }
+        } else vol_down_lock = 0;
+        if (HAL_GPIO_ReadPin(KEY_2_GPIO_Port, KEY_2_Pin) == GPIO_PIN_RESET) {
+            if (!vol_up_lock) {
+                uint8_t volume = Audio_BGM_GetVolume();
+                vol_up_lock = 1;
+                if (volume < 10) {
+                    Audio_BGM_SetVolume(volume + 1);
+                    draw_menu_volume();
+                }
+            }
+        } else vol_up_lock = 0;
         /* IR remote start (PLAY button) */
         { uint32_t code; if (ir_read_key(&code) && code == 0x00FF02FD) start_new_game(); }
         return;

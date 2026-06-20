@@ -1,0 +1,12 @@
+#ifndef __KOROBEINIKI_PCM_H
+#define __KOROBEINIKI_PCM_H
+
+#include "main.h"
+
+#define KOROBEINIKI_PCM_SAMPLE_RATE 8000U
+#define KOROBEINIKI_PCM_CHANNELS 1U
+#define KOROBEINIKI_PCM_SAMPLE_COUNT 356572U
+
+extern const int16_t korobeiniki_pcm[KOROBEINIKI_PCM_SAMPLE_COUNT];
+
+#endif /* __KOROBEINIKI_PCM_H */
