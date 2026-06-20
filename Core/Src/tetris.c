@@ -367,6 +367,9 @@ static void game_key_handler(void)
 
 /* ---- 游戏结束页面 ------------------------------------------------ */
 
+static void draw_start_screen(void);
+static void draw_menu_volume(void);
+
 static void show_game_over(void)
 {
     spi_flash_game_record_t last_record;
@@ -397,8 +400,22 @@ static void show_game_over(void)
     LCD_ShowString(BOARD_X_OFF + 12, BOARD_Y_OFF + 168, 72, 12, 12, (uint8_t *)"BEST");
     LCD_ShowxNum(BOARD_X_OFF + 54, BOARD_Y_OFF + 168, App_Settings_Get()->high_score, 5, 12, 0x80);
     POINT_COLOR = GRAY;
-    LCD_ShowString(BOARD_X_OFF + 20, BOARD_Y_OFF + 188, 96, 12, 12,
+    LCD_ShowString(BOARD_X_OFF + 12, BOARD_Y_OFF + 188, 96, 12, 12,
                    (uint8_t *)"KEY0 START");
+    LCD_ShowString(BOARD_X_OFF + 12, BOARD_Y_OFF + 204, 96, 12, 12,
+                   (uint8_t *)"UP MENU");
+}
+
+static void return_to_start_menu(void)
+{
+    game_state = STATE_MENU;
+    menu_history_visible = 0;
+    menu_history_page = 0;
+    menu_volume_drawn = 0xFF;
+    draw_start_screen();
+    draw_menu_volume();
+    Audio_BGM_Start();
+    Led_Feedback_SetState(LED_FEEDBACK_MENU);
 }
 
 /* ---- 游戏主界面静态布局 ------------------------------------------ */
@@ -869,9 +886,13 @@ void tetris_loop(void)
 
     if (game_state == STATE_GAME_OVER) {
         static uint8_t restart_lock;
+        static uint8_t menu_back_lock;
         if (HAL_GPIO_ReadPin(KEY_0_GPIO_Port, KEY_0_Pin) == GPIO_PIN_RESET) {
             if (!restart_lock) { restart_lock = 1; start_new_game(); }
         } else restart_lock = 0;
+        if (HAL_GPIO_ReadPin(KEY_UP_GPIO_Port, KEY_UP_Pin) == GPIO_PIN_SET) {
+            if (!menu_back_lock) { menu_back_lock = 1; return_to_start_menu(); }
+        } else menu_back_lock = 0;
         { uint32_t code; if (ir_read_key(&code) && code == 0x00FF02FD) start_new_game(); }
         return;
     }
