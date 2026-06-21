@@ -1,4 +1,11 @@
-﻿#include "tetris.h"
+/**
+ * @file tetris.c
+ * @brief 俄罗斯方块游戏主逻辑、GUI 绘制、菜单状态机和结算保存。
+ *
+ * 本文件是项目的核心应用层：负责方块移动、旋转、消行和计分，
+ * 同时联动 BGM、LED、EEPROM、RTC 和 SPI FLASH 等硬件功能。
+ */
+#include "tetris.h"
 #include "audio_bgm.h"
 #include "app_rtc.h"
 #include "app_settings.h"
@@ -7,8 +14,8 @@
 #include <stdlib.h>
 #include <string.h>
 /* 红外解码结果由 stm32f4xx_it.c 的中断逻辑更新。 */
-extern volatile uint8_t  ir_ready;
-extern volatile uint32_t ir_code;
+extern volatile uint8_t  ir_ready; /* 红外解码完成标志，1 表示 ir_code 中有新键值。 */
+extern volatile uint32_t ir_code;  /* 最近一次红外 NEC 解码得到的键值。 */
 
 /* ===================================================================
  *  俄罗斯方块形状数据，使用 4x4 位图描述。
@@ -37,36 +44,56 @@ const uint16_t COLOR_MAP[8] = {
 };
 
 /* ---- 游戏状态 ---------------------------------------------------- */
-static uint8_t  board[BOARD_ROWS][BOARD_COLS];   /* 0 为空格，1..7 为颜色索引 */
-static int8_t   piece_type, next_type;
-static int8_t   piece_rot;                        /* 当前旋转形态，范围 0..3 */
-static int8_t   piece_x, piece_y;                 /* 4x4 方块左上角在棋盘中的坐标 */
-static uint32_t score, lines_total, level;
-static uint32_t fall_speed;                       /* 自动下落间隔，单位 ms */
-static uint32_t last_fall_tick, last_key_tick;
-static uint8_t  game_state;
-static int8_t   ghost_y;
-static uint8_t  menu_volume_drawn = 0xFF;
-static uint8_t  menu_history_visible;
-static uint8_t  menu_history_page;
-static uint32_t game_start_tick;
-static app_datetime_t game_start_time;
+static uint8_t board[BOARD_ROWS][BOARD_COLS]; /* 棋盘内容，0 为空格，1..7 为颜色索引。 */
+static int8_t piece_type;                      /* 当前活动方块类型，范围 0..6。 */
+static int8_t next_type;                       /* 下一块方块类型，用于 NEXT 预览。 */
+static int8_t piece_rot;                       /* 当前活动方块旋转形态，范围 0..3。 */
+static int8_t piece_x;                         /* 当前活动方块 4x4 位图左上角 X 棋盘坐标。 */
+static int8_t piece_y;                         /* 当前活动方块 4x4 位图左上角 Y 棋盘坐标。 */
+static uint32_t score;                         /* 当前局得分。 */
+static uint32_t lines_total;                   /* 当前局累计消除行数。 */
+static uint32_t level;                         /* 当前等级，由消除行数推导。 */
+static uint32_t fall_speed;                    /* 自动下落间隔，单位 ms。 */
+static uint32_t last_fall_tick;                /* 上一次自动下落的 HAL tick。 */
+static uint32_t last_key_tick;                 /* 上一次处理按键的 HAL tick，用于消抖。 */
+static uint8_t game_state;                     /* 当前游戏状态：菜单、游戏中或结束。 */
+static int8_t ghost_y;                         /* 影子方块最终落点的 Y 坐标。 */
+static uint8_t menu_volume_drawn = 0xFF;       /* 上一次绘制的菜单音量，0xFF 强制首次刷新。 */
+static uint8_t menu_history_visible;           /* 菜单中是否正在显示 EEPROM 历史页。 */
+static uint8_t menu_history_page;              /* EEPROM 历史页当前页码，从 0 开始。 */
+static uint32_t game_start_tick;               /* 本局开始时的 HAL tick，用于计算持续时间。 */
+static app_datetime_t game_start_time;         /* 本局开始时的 RTC 时间，用于写入历史记录。 */
+static const uint16_t *beep_pattern;           /* 当前蜂鸣器音效节奏表，奇偶段交替开/关。 */
+static uint8_t beep_pattern_len;               /* 当前音效节奏表的段数。 */
+static uint8_t beep_pattern_pos;               /* 当前播放到节奏表中的第几段。 */
+static uint8_t beep_priority;                  /* 当前音效优先级，避免低优先级音效打断高优先级音效。 */
+static uint8_t beep_output_on;                 /* 当前蜂鸣器输出状态，1 表示正在拉高发声。 */
+static uint32_t beep_next_tick;                /* 当前蜂鸣器节奏段结束的 HAL tick。 */
 
-#define STATE_MENU       0
-#define STATE_PLAYING    1
-#define STATE_GAME_OVER  2
+#define STATE_MENU       0 /* 开始菜单状态。 */
+#define STATE_PLAYING    1 /* 游戏进行中状态。 */
+#define STATE_GAME_OVER  2 /* 游戏结束结算状态。 */
+
+#define BEEP_EFFECT_MOVE       1U /* 方块移动音效，短促单击。 */
+#define BEEP_EFFECT_ROTATE     2U /* 方块旋转音效，略长单击。 */
+#define BEEP_EFFECT_DROP       3U /* 硬降音效，两段快速提示。 */
+#define BEEP_EFFECT_LINE       4U /* 消行音效，三段上扬式节奏。 */
+#define BEEP_EFFECT_GAME_OVER  5U /* 游戏结束音效，较长的下降式节奏。 */
 
 /* ---- 通用辅助函数 ------------------------------------------------ */
+/* 返回指定方块类型和旋转状态对应的 16 位 4x4 位图。 */
 static inline uint16_t shape_word(int type, int rot)
 {
     return shapes[type][rot];
 }
 
+/* 判断方块 4x4 位图中第 i 列、第 j 行是否有格子。 */
 static inline int cell_set(int type, int rot, int i, int j)
 {
     return (shape_word(type, rot) >> (j * 4 + i)) & 1;
 }
 
+/* 将 RGB565 颜色按比例压暗，用于绘制方块阴影和边框。 */
 static uint16_t dim_color(uint16_t color)
 {
     uint16_t r = (uint16_t)((color >> 11) & 0x1FU);
@@ -79,6 +106,7 @@ static uint16_t dim_color(uint16_t color)
     return (uint16_t)((r << 11) | (g << 5) | b);
 }
 
+/* 绘制带浅色投影和黑色边框的小面板。 */
 static void draw_panel_box(uint16_t x1, uint16_t y1, uint16_t x2, uint16_t y2, uint16_t fill)
 {
     LCD_Fill(x1 + 1U, y1 + 1U, x2 - 1U, y2 - 1U, fill);
@@ -88,6 +116,7 @@ static void draw_panel_box(uint16_t x1, uint16_t y1, uint16_t x2, uint16_t y2, u
     LCD_DrawRectangle(x1, y1, x2, y2);
 }
 
+/* 绘制菜单/结算页面中的矩形按钮；inverted=1 使用黑底白字。 */
 static void draw_button(uint16_t x1, uint16_t y1, uint16_t x2, uint16_t y2,
                         const char *text, uint8_t inverted)
 {
@@ -153,6 +182,7 @@ static void draw_next_block(uint8_t gx, uint8_t gy, uint8_t ci)
 
 /* ---- 棋盘和方块绘制 ---------------------------------------------- */
 
+/* 按 board 数组完整重绘棋盘，常用于开局、硬降和消行后刷新。 */
 static void draw_board_full(void)
 {
     for (int r = 0; r < BOARD_ROWS; r++)
@@ -201,6 +231,7 @@ static void draw_next_piece(void)
 
 /* ---- 分数和等级显示 ---------------------------------------------- */
 
+/* 只刷新右侧 SCORE/LINES/LEVEL 数值区域，减少整屏重绘闪烁。 */
 static void draw_score_panel(void)
 {
     POINT_COLOR = BLACK;
@@ -215,6 +246,7 @@ static void draw_score_panel(void)
 
 /* ---- 碰撞检测 ---------------------------------------------------- */
 
+/* 判断活动方块放在指定坐标和旋转状态时是否越界或撞到已有方块。 */
 static int check_hit(int x, int y, int rot)
 {
     for (int j = 0; j < 4; j++)
@@ -232,6 +264,7 @@ static int check_hit(int x, int y, int rot)
 
 /* ---- 固定当前方块到棋盘 ------------------------------------------ */
 
+/* 将当前活动方块写入 board，表示方块已经落定。 */
 static void merge_piece(void)
 {
     for (int j = 0; j < 4; j++)
@@ -246,6 +279,10 @@ static void merge_piece(void)
 
 /* ---- 消行逻辑 ---------------------------------------------------- */
 
+/* 蜂鸣器音效函数前向声明，消行逻辑定义在音效实现之前。 */
+static void beep_play(uint8_t effect);
+
+/* 找到指定方块旋转状态最右侧占用列，用于靠墙旋转修正。 */
 static int rightmost_col(int type, int rot)
 {
     for (int c = 3; c >= 0; c--)
@@ -255,6 +292,7 @@ static int rightmost_col(int type, int rot)
     return 0;
 }
 
+/* 消行前的短暂闪烁动效，用于提示玩家该行被清除。 */
 static void flash_line(uint8_t row)
 {
     uint16_t x1 = BOARD_X_OFF;
@@ -272,6 +310,7 @@ static void flash_line(uint8_t row)
     HAL_Delay(28);
 }
 
+/* 检查满行、执行消除、更新分数等级，并触发 LED 消行反馈。 */
 static void remove_lines(void)
 {
     int cleared = 0;
@@ -297,12 +336,14 @@ static void remove_lines(void)
         fall_speed   = FALL_SPEED_INIT - level * 30;
         if (fall_speed < FALL_SPEED_MIN) fall_speed = FALL_SPEED_MIN;
         Led_Feedback_SetState(LED_FEEDBACK_LINE_CLEAR);
+        beep_play(BEEP_EFFECT_LINE);
         draw_score_panel();
     }
 }
 
 /* ---- 生成新方块 -------------------------------------------------- */
 
+/* 从 next_type 生成新的活动方块，并随机准备下一块。 */
 static void new_piece(void)
 {
     piece_type = next_type;
@@ -319,21 +360,86 @@ static void new_piece(void)
     draw_next_piece();
 }
 
-/* ---- 按键音反馈 -------------------------------------------------- */
+/* ---- 蜂鸣器音效反馈 ---------------------------------------------- */
 
-static void beep_short(void)
+/* 关闭蜂鸣器输出，并清空当前音效状态。 */
+static void beep_stop(void)
 {
-    HAL_GPIO_WritePin(BEEP_GPIO_Port, BEEP_Pin, GPIO_PIN_SET);
-    HAL_Delay(20);
     HAL_GPIO_WritePin(BEEP_GPIO_Port, BEEP_Pin, GPIO_PIN_RESET);
+    beep_output_on = 0;
+    beep_pattern = 0;
+    beep_pattern_len = 0;
+    beep_pattern_pos = 0;
+    beep_priority = 0;
 }
 
-/* 影子方块函数声明，按键处理中需要提前使用。 */
+/* 根据游戏动作启动不同的蜂鸣器节奏；优先级较低的音效不会打断高优先级音效。 */
+static void beep_play(uint8_t effect)
+{
+    static const uint16_t move_pattern[] = { 12U };
+    static const uint16_t rotate_pattern[] = { 24U };
+    static const uint16_t drop_pattern[] = { 18U, 18U, 28U };
+    static const uint16_t line_pattern[] = { 22U, 18U, 22U, 18U, 42U };
+    static const uint16_t game_over_pattern[] = { 80U, 45U, 60U, 45U, 120U };
+    const uint16_t *pattern = move_pattern;
+    uint8_t len = sizeof(move_pattern) / sizeof(move_pattern[0]);
+    uint8_t priority = effect;
+
+    if (beep_pattern != 0 && beep_priority > priority) {
+        return;
+    }
+
+    if (effect == BEEP_EFFECT_ROTATE) {
+        pattern = rotate_pattern;
+        len = sizeof(rotate_pattern) / sizeof(rotate_pattern[0]);
+    } else if (effect == BEEP_EFFECT_DROP) {
+        pattern = drop_pattern;
+        len = sizeof(drop_pattern) / sizeof(drop_pattern[0]);
+    } else if (effect == BEEP_EFFECT_LINE) {
+        pattern = line_pattern;
+        len = sizeof(line_pattern) / sizeof(line_pattern[0]);
+    } else if (effect == BEEP_EFFECT_GAME_OVER) {
+        pattern = game_over_pattern;
+        len = sizeof(game_over_pattern) / sizeof(game_over_pattern[0]);
+    }
+
+    beep_pattern = pattern;
+    beep_pattern_len = len;
+    beep_pattern_pos = 0;
+    beep_priority = priority;
+    beep_output_on = 1;
+    HAL_GPIO_WritePin(BEEP_GPIO_Port, BEEP_Pin, GPIO_PIN_SET);
+    beep_next_tick = HAL_GetTick() + beep_pattern[0];
+}
+
+/* 非阻塞刷新蜂鸣器节奏，奇数段静音、偶数段发声。 */
+static void beep_task(void)
+{
+    uint32_t now = HAL_GetTick();
+
+    if (beep_pattern == 0 || now < beep_next_tick) {
+        return;
+    }
+
+    beep_pattern_pos++;
+    if (beep_pattern_pos >= beep_pattern_len) {
+        beep_stop();
+        return;
+    }
+
+    beep_output_on = (uint8_t)((beep_pattern_pos & 1U) == 0U);
+    HAL_GPIO_WritePin(BEEP_GPIO_Port, BEEP_Pin, beep_output_on ? GPIO_PIN_SET : GPIO_PIN_RESET);
+    beep_next_tick = now + beep_pattern[beep_pattern_pos];
+}
+
+/* 影子方块擦除函数前向声明，按键处理中会在定义前调用。 */
 static void erase_ghost(void);
+/* 影子方块绘制函数前向声明，按键处理中会在定义前调用。 */
 static void draw_ghost(void);
 
 /* ---- 按键处理，非阻塞，20 ms 消抖 ------------------------------- */
 
+/* 处理游戏进行中的板载按键，包含消抖、移动、旋转和硬降。 */
 static void game_key_handler(void)
 {
     uint32_t now = HAL_GetTick();
@@ -352,6 +458,7 @@ static void game_key_handler(void)
                 piece_x--;
                 draw_piece();
                 draw_ghost();
+                beep_play(BEEP_EFFECT_MOVE);
             }
         }
     } else k0_lock = 0;
@@ -366,6 +473,7 @@ static void game_key_handler(void)
                 piece_x++;
                 draw_piece();
                 draw_ghost();
+                beep_play(BEEP_EFFECT_MOVE);
             }
         }
     } else k2_lock = 0;
@@ -408,6 +516,7 @@ static void game_key_handler(void)
 
             draw_piece();
             draw_ghost();
+            beep_play(BEEP_EFFECT_ROTATE);
         }
     } else k1_lock = 0;
 
@@ -423,7 +532,7 @@ static void game_key_handler(void)
             draw_board_full();
             remove_lines();
             draw_board_full();     /* 消行搬移后重绘棋盘。 */
-            beep_short();
+            beep_play(BEEP_EFFECT_DROP);
             new_piece();
             if (game_state == STATE_PLAYING) { draw_piece(); draw_ghost(); }
         }
@@ -432,9 +541,12 @@ static void game_key_handler(void)
 
 /* ---- 游戏结束页面 ------------------------------------------------ */
 
+/* 开始菜单绘制函数前向声明，Game Over 返回菜单时会提前调用。 */
 static void draw_start_screen(void);
+/* 菜单音量条绘制函数前向声明，Game Over 返回菜单时会提前调用。 */
 static void draw_menu_volume(void);
 
+/* 绘制 Game Over 结算页，并保存 EEPROM 历史和 SPI FLASH 快照。 */
 static void show_game_over(void)
 {
     spi_flash_game_record_t last_record;
@@ -442,6 +554,7 @@ static void show_game_over(void)
 
     Audio_BGM_Stop();
     Led_Feedback_SetState(LED_FEEDBACK_GAME_OVER);
+    beep_play(BEEP_EFFECT_GAME_OVER);
     /* 游戏结束时同时写 EEPROM 历史记录和 SPI FLASH 最近一局快照。 */
     App_Settings_AddGameResult(score, lines_total, duration_seconds, &game_start_time);
     last_record.score = score;
@@ -476,6 +589,7 @@ static void show_game_over(void)
                 BOARD_X_OFF + 112, BOARD_Y_OFF + 202, "MENU", 0);
 }
 
+/* 从 Game Over 返回开始菜单，方便查看记录或调整音量。 */
 static void return_to_start_menu(void)
 {
     game_state = STATE_MENU;
@@ -490,6 +604,7 @@ static void return_to_start_menu(void)
 
 /* ---- 游戏主界面静态布局 ------------------------------------------ */
 
+/* 绘制游戏主界面的固定元素：标题栏、棋盘框、右侧 HUD 和按键说明。 */
 static void draw_static_ui(void)
 {
     LCD_Init();
@@ -542,15 +657,14 @@ static void draw_static_ui(void)
     POINT_COLOR = LGRAY;
     LCD_ShowString(8, 309, 144, 12, 12, (uint8_t *)"STM32F407");
 }
-/* 影子方块函数声明，红外遥控动作中也会使用。 */
-
+/* 红外遥控动作也需要擦除/绘制影子方块，因此这里保留前向声明。 */
 static void erase_ghost(void);
-
 static void draw_ghost(void);
 
 
 /* ---- 红外遥控按键轮询 -------------------------------------------- */
 
+/* 读取一次红外键值；成功读取后清除 ir_ready，避免重复触发。 */
 static uint8_t ir_read_key(uint32_t *code)
 
 {
@@ -567,6 +681,7 @@ static uint8_t ir_read_key(uint32_t *code)
 
 }
 
+/* 将红外遥控键值映射为游戏动作。 */
 static void ir_do_action(uint32_t code)
 
 {
@@ -577,13 +692,13 @@ static void ir_do_action(uint32_t code)
 
         if (!check_hit(piece_x - 1, piece_y, piece_rot))
 
-            { erase_ghost(); erase_piece(); piece_x--; draw_piece(); draw_ghost(); } break;
+            { erase_ghost(); erase_piece(); piece_x--; draw_piece(); draw_ghost(); beep_play(BEEP_EFFECT_MOVE); } break;
 
     case 0x00FFC23D:
 
         if (!check_hit(piece_x + 1, piece_y, piece_rot))
 
-            { erase_ghost(); erase_piece(); piece_x++; draw_piece(); draw_ghost(); } break;
+            { erase_ghost(); erase_piece(); piece_x++; draw_piece(); draw_ghost(); beep_play(BEEP_EFFECT_MOVE); } break;
 
     case 0x00FF629D:
 
@@ -603,7 +718,7 @@ static void ir_do_action(uint32_t code)
 
           }
 
-          piece_rot = nr; piece_x = nx; draw_piece(); draw_ghost();
+          piece_rot = nr; piece_x = nx; draw_piece(); draw_ghost(); beep_play(BEEP_EFFECT_ROTATE);
 
         } break;
 
@@ -613,7 +728,7 @@ static void ir_do_action(uint32_t code)
 
           while (!check_hit(piece_x, piece_y + 1, piece_rot)) piece_y++;
 
-          merge_piece(); draw_board_full(); remove_lines(); draw_board_full(); beep_short();
+          merge_piece(); draw_board_full(); remove_lines(); draw_board_full(); beep_play(BEEP_EFFECT_DROP);
 
           new_piece();
 
@@ -630,6 +745,7 @@ static void ir_do_action(uint32_t code)
 
 /* ---- 开始菜单 ---------------------------------------------------- */
 
+/* 绘制开始菜单，包括标题、音量、最高分、按键说明和历史入口。 */
 static void draw_start_screen(void)
 
 {
@@ -687,6 +803,7 @@ static void draw_start_screen(void)
 
 }
 
+/* 绘制 EEPROM 历史记录页，按最近记录分页显示分数和时间。 */
 static void draw_eeprom_history_screen(void)
 {
     const app_settings_t *s = App_Settings_Get();
@@ -764,6 +881,7 @@ static void draw_eeprom_history_screen(void)
     LCD_ShowString(16, 292, 208, 12, 12, (uint8_t *)"K1/K2 PAGE  UP BACK");
 }
 
+/* 根据当前音量绘制菜单中的 10 格音量条，并避免重复刷新。 */
 static void draw_menu_volume(void)
 {
     uint8_t volume = Audio_BGM_GetVolume();
@@ -789,6 +907,7 @@ static void draw_menu_volume(void)
 
 /* ---- 影子方块，下落位置预览 -------------------------------------- */
 
+/* 计算当前活动方块如果硬降到底后的 Y 坐标。 */
 static int8_t calc_ghost_y(void)
 
 {
@@ -801,6 +920,7 @@ static int8_t calc_ghost_y(void)
 
 }
 
+/* 擦除旧影子方块，恢复其覆盖位置的棋盘内容。 */
 static void erase_ghost(void)
 
 {
@@ -819,6 +939,7 @@ static void erase_ghost(void)
 
 }
 
+/* 绘制影子方块边框，提示当前方块最终落点。 */
 static void draw_ghost(void)
 
 {
@@ -854,6 +975,7 @@ static void draw_ghost(void)
 
 /* ---- 新游戏初始化 ------------------------------------------------ */
 
+/* 重置棋盘和分数，记录开局时间，启动 BGM 并进入游戏状态。 */
 static void start_new_game(void)
 
 {
@@ -883,10 +1005,12 @@ static void start_new_game(void)
  *  对外接口
  * ================================================================== */
 
+/* 初始化 Tetris 模块，显示开始菜单并进入菜单状态。 */
 void tetris_init(void)
 {
     draw_static_ui();
     BACK_COLOR = WHITE;
+    beep_stop();
     draw_start_screen();
     draw_menu_volume();
     Audio_BGM_Start();
@@ -895,8 +1019,11 @@ void tetris_init(void)
 }
 
 
+/* Tetris 主状态机，根据当前状态调度菜单、游戏中和 Game Over 逻辑。 */
 void tetris_loop(void)
 {
+    beep_task();
+
     if (game_state == STATE_MENU) {
         static uint8_t menu_lock;
         static uint8_t vol_down_lock;

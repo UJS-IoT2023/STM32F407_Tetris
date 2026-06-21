@@ -1,13 +1,20 @@
+/**
+ * @file app_rtc.c
+ * @brief RTC 初始化、时间读取和时间设置实现。
+ *
+ * 模块优先尝试 LSE 作为 RTC 时钟源，失败时回退到 LSI。首次启动时
+ * 使用固件编译时间初始化 RTC，保证 EEPROM 历史记录能得到可显示时间。
+ */
 #include "app_rtc.h"
 
 #include <string.h>
 
-#define RTC_BACKUP_MARKER      0xA55AU
-#define RTC_DEFAULT_YEAR       2026U
+#define RTC_BACKUP_MARKER      0xA55AU /* 写入备份寄存器，用来标记 RTC 已初始化。 */
+#define RTC_DEFAULT_YEAR       2026U   /* 编译时间异常偏旧时使用的最低年份。 */
 
-RTC_HandleTypeDef hrtc;
+RTC_HandleTypeDef hrtc; /* HAL RTC 句柄，供本模块和 HAL 回调使用。 */
 
-static uint8_t rtc_running;
+static uint8_t rtc_running; /* RTC 初始化成功标志，1 表示可读取/设置 RTC。 */
 
 /* 将 __DATE__ 的英文月份缩写转换为 1..12。 */
 static uint8_t month_from_build(const char *mon)
@@ -22,11 +29,13 @@ static uint8_t month_from_build(const char *mon)
     return 1;
 }
 
+/* 将两个 ASCII 数字字符转换为 0..99 的数值。 */
 static uint8_t dec2(const char *s)
 {
     return (uint8_t)((s[0] - '0') * 10 + (s[1] - '0'));
 }
 
+/* 根据 __DATE__/__TIME__ 构造默认时间，用于首次启动或 RTC 失败兜底。 */
 static void build_datetime(app_datetime_t *dt)
 {
     const char *date = __DATE__;
@@ -46,6 +55,7 @@ static void build_datetime(app_datetime_t *dt)
     }
 }
 
+/* 配置 RTC 时钟源；use_lse=1 选择 LSE，use_lse=0 选择 LSI。 */
 static uint8_t rtc_clock_config(uint8_t use_lse)
 {
     RCC_OscInitTypeDef osc = {0};
@@ -79,6 +89,7 @@ static uint8_t rtc_clock_config(uint8_t use_lse)
     return 1;
 }
 
+/* 初始化 RTC 外设和备份域标记，必要时写入默认时间。 */
 void App_RTC_Init(void)
 {
     app_datetime_t dt;
@@ -117,11 +128,13 @@ void App_RTC_Init(void)
     }
 }
 
+/* 返回 RTC 是否处于可用状态。 */
 uint8_t App_RTC_IsRunning(void)
 {
     return rtc_running;
 }
 
+/* 读取 RTC 当前时间，失败时返回编译时间。 */
 void App_RTC_GetDateTime(app_datetime_t *dt)
 {
     RTC_DateTypeDef date;
@@ -147,6 +160,7 @@ void App_RTC_GetDateTime(app_datetime_t *dt)
     dt->second = time.Seconds;
 }
 
+/* 设置 RTC 日期和时间，并刷新备份寄存器初始化标记。 */
 uint8_t App_RTC_SetDateTime(const app_datetime_t *dt)
 {
     RTC_DateTypeDef date = {0};
