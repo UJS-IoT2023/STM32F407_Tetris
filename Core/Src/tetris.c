@@ -67,6 +67,42 @@ static inline int cell_set(int type, int rot, int i, int j)
     return (shape_word(type, rot) >> (j * 4 + i)) & 1;
 }
 
+static uint16_t dim_color(uint16_t color)
+{
+    uint16_t r = (uint16_t)((color >> 11) & 0x1FU);
+    uint16_t g = (uint16_t)((color >> 5) & 0x3FU);
+    uint16_t b = (uint16_t)(color & 0x1FU);
+
+    r = (uint16_t)((r * 3U) / 5U);
+    g = (uint16_t)((g * 3U) / 5U);
+    b = (uint16_t)((b * 3U) / 5U);
+    return (uint16_t)((r << 11) | (g << 5) | b);
+}
+
+static void draw_panel_box(uint16_t x1, uint16_t y1, uint16_t x2, uint16_t y2, uint16_t fill)
+{
+    LCD_Fill(x1 + 1U, y1 + 1U, x2 - 1U, y2 - 1U, fill);
+    POINT_COLOR = LGRAY;
+    LCD_DrawRectangle(x1 + 1U, y1 + 1U, x2 + 1U, y2 + 1U);
+    POINT_COLOR = BLACK;
+    LCD_DrawRectangle(x1, y1, x2, y2);
+}
+
+static void draw_button(uint16_t x1, uint16_t y1, uint16_t x2, uint16_t y2,
+                        const char *text, uint8_t inverted)
+{
+    uint16_t fill = inverted ? BLACK : WHITE;
+    uint16_t text_color = inverted ? WHITE : BLACK;
+
+    LCD_Fill(x1, y1, x2, y2, fill);
+    POINT_COLOR = inverted ? GRAY : BLACK;
+    LCD_DrawRectangle(x1, y1, x2, y2);
+    POINT_COLOR = text_color;
+    BACK_COLOR = fill;
+    LCD_ShowString(x1 + 7U, y1 + 6U, (uint16_t)(x2 - x1 - 10U), 12, 12, (uint8_t *)text);
+    BACK_COLOR = WHITE;
+}
+
 /* ---- 底层绘制 ---------------------------------------------------- */
 
 /* 在棋盘坐标 (gx, gy) 绘制一个小方块。 */
@@ -79,18 +115,23 @@ static void draw_block(uint8_t gx, uint8_t gy, uint8_t ci)
 
     if (ci == 0) {
         LCD_Fill(px1, py1, px2, py2, WHITE);
-        POINT_COLOR = LGRAY;
+        POINT_COLOR = 0xEF7D;
         LCD_DrawRectangle(px1, py1, px2, py2);
     } else {
-        LCD_Fill(px1, py1, px2, py2, COLOR_MAP[ci]);
+        uint16_t base = COLOR_MAP[ci];
+        uint16_t dark = dim_color(base);
+
+        LCD_Fill(px1 + 1U, py1 + 1U, px2 - 1U, py2 - 1U, base);
+        LCD_Fill(px1 + 3U, py1 + 3U, px2 - 4U, py1 + 4U, WHITE);
         /* 左上高光，增强小方块立体感。 */
         POINT_COLOR = WHITE;
         LCD_DrawLine(px1, py1, px2, py1);
         LCD_DrawLine(px1, py1, px1, py2);
         /* 右下阴影。 */
-        POINT_COLOR = GRAY;
+        POINT_COLOR = dark;
         LCD_DrawLine(px1, py2, px2, py2);
         LCD_DrawLine(px2, py1, px2, py2);
+        LCD_DrawRectangle(px1 + 1U, py1 + 1U, px2 - 1U, py2 - 1U);
     }
 }
 
@@ -101,7 +142,13 @@ static void draw_next_block(uint8_t gx, uint8_t gy, uint8_t ci)
     uint16_t py1 = NEXT_Y  + gy * NEXT_SIZE;
     uint16_t px2 = px1 + NEXT_SIZE - 1;
     uint16_t py2 = py1 + NEXT_SIZE - 1;
-    LCD_Fill(px1, py1, px2, py2, ci ? COLOR_MAP[ci] : WHITE);
+    if (ci == 0U) {
+        LCD_Fill(px1, py1, px2, py2, WHITE);
+    } else {
+        LCD_Fill(px1 + 1U, py1 + 1U, px2 - 1U, py2 - 1U, COLOR_MAP[ci]);
+        POINT_COLOR = dim_color(COLOR_MAP[ci]);
+        LCD_DrawRectangle(px1, py1, px2, py2);
+    }
 }
 
 /* ---- 棋盘和方块绘制 ---------------------------------------------- */
@@ -208,6 +255,23 @@ static int rightmost_col(int type, int rot)
     return 0;
 }
 
+static void flash_line(uint8_t row)
+{
+    uint16_t x1 = BOARD_X_OFF;
+    uint16_t y1 = (uint16_t)(BOARD_Y_OFF + row * BLOCK_SIZE);
+    uint16_t x2 = (uint16_t)(BOARD_X_OFF + BOARD_COLS * BLOCK_SIZE - 1U);
+    uint16_t y2 = (uint16_t)(y1 + BLOCK_SIZE - 1U);
+
+    LCD_Fill(x1, y1, x2, y2, WHITE);
+    HAL_Delay(28);
+    for (uint8_t c = 0; c < BOARD_COLS; c++) {
+        draw_block(c, row, board[row][c]);
+    }
+    HAL_Delay(28);
+    LCD_Fill(x1, y1, x2, y2, YELLOW);
+    HAL_Delay(28);
+}
+
 static void remove_lines(void)
 {
     int cleared = 0;
@@ -217,6 +281,7 @@ static void remove_lines(void)
             if (!board[r][c]) { full = 0; break; }
         if (full) {
             cleared++;
+            flash_line((uint8_t)r);
             /* 将上方行整体下移。 */
             for (int rr = r; rr > 0; rr--)
                 memcpy(board[rr], board[rr - 1], BOARD_COLS);
@@ -384,26 +449,31 @@ static void show_game_over(void)
     last_record.level = level;
     last_record.volume = Audio_BGM_GetVolume();
     (void)SpiFlash_SaveGameRecord(&last_record);
-    LCD_Fill(BOARD_X_OFF + 4, BOARD_Y_OFF + 52,
+    draw_panel_box(BOARD_X_OFF + 4, BOARD_Y_OFF + 48,
+                   BOARD_X_OFF + BOARD_COLS * BLOCK_SIZE - 5,
+                   BOARD_Y_OFF + 202, WHITE);
+    LCD_Fill(BOARD_X_OFF + 4, BOARD_Y_OFF + 48,
              BOARD_X_OFF + BOARD_COLS * BLOCK_SIZE - 5,
-             BOARD_Y_OFF + 184, WHITE);
+             BOARD_Y_OFF + 50, RED);
     POINT_COLOR = BLACK;
     BACK_COLOR  = WHITE;
     LCD_ShowString(BOARD_X_OFF + 10, BOARD_Y_OFF + 62, 120, 24, 24,
                    (uint8_t *)"GAME");
     LCD_ShowString(BOARD_X_OFF + 10, BOARD_Y_OFF + 92, 120, 24, 24,
                    (uint8_t *)"OVER");
+    LCD_Fill(BOARD_X_OFF + 12, BOARD_Y_OFF + 122,
+             BOARD_X_OFF + BOARD_COLS * BLOCK_SIZE - 14,
+             BOARD_Y_OFF + 123, LGRAY);
     LCD_ShowString(BOARD_X_OFF + 12, BOARD_Y_OFF + 132, 72, 12, 12, (uint8_t *)"SCORE");
-    LCD_ShowxNum(BOARD_X_OFF + 54, BOARD_Y_OFF + 132, score, 5, 12, 0x80);
-    LCD_ShowString(BOARD_X_OFF + 12, BOARD_Y_OFF + 150, 72, 12, 12, (uint8_t *)"LINES");
-    LCD_ShowxNum(BOARD_X_OFF + 54, BOARD_Y_OFF + 150, lines_total, 4, 12, 0x80);
-    LCD_ShowString(BOARD_X_OFF + 12, BOARD_Y_OFF + 168, 72, 12, 12, (uint8_t *)"BEST");
-    LCD_ShowxNum(BOARD_X_OFF + 54, BOARD_Y_OFF + 168, App_Settings_Get()->high_score, 5, 12, 0x80);
-    POINT_COLOR = GRAY;
-    LCD_ShowString(BOARD_X_OFF + 12, BOARD_Y_OFF + 188, 96, 12, 12,
-                   (uint8_t *)"KEY0 START");
-    LCD_ShowString(BOARD_X_OFF + 12, BOARD_Y_OFF + 204, 96, 12, 12,
-                   (uint8_t *)"UP MENU");
+    LCD_ShowxNum(BOARD_X_OFF + 58, BOARD_Y_OFF + 132, score, 5, 12, 0x80);
+    LCD_ShowString(BOARD_X_OFF + 12, BOARD_Y_OFF + 148, 72, 12, 12, (uint8_t *)"LINES");
+    LCD_ShowxNum(BOARD_X_OFF + 58, BOARD_Y_OFF + 148, lines_total, 4, 12, 0x80);
+    LCD_ShowString(BOARD_X_OFF + 12, BOARD_Y_OFF + 164, 72, 12, 12, (uint8_t *)"BEST");
+    LCD_ShowxNum(BOARD_X_OFF + 58, BOARD_Y_OFF + 164, App_Settings_Get()->high_score, 5, 12, 0x80);
+    draw_button(BOARD_X_OFF + 12, BOARD_Y_OFF + 182,
+                BOARD_X_OFF + 60, BOARD_Y_OFF + 202, "KEY0", 1);
+    draw_button(BOARD_X_OFF + 68, BOARD_Y_OFF + 182,
+                BOARD_X_OFF + 112, BOARD_Y_OFF + 202, "MENU", 0);
 }
 
 static void return_to_start_menu(void)
@@ -428,37 +498,47 @@ static void draw_static_ui(void)
     BACK_COLOR  = WHITE;
 
     /* 顶部标题。 */
-    POINT_COLOR = BLACK;
+    LCD_Fill(0, 0, 239, 30, BLACK);
+    POINT_COLOR = WHITE;
+    BACK_COLOR = BLACK;
     LCD_ShowString(8, 8, 140, 16, 16, (uint8_t *)"TETRIS");
+    POINT_COLOR = CYAN;
+    LCD_Fill(174, 12, 186, 20, CYAN);
+    LCD_Fill(188, 12, 200, 20, MAGENTA);
+    LCD_Fill(202, 12, 214, 20, GREEN);
+    LCD_Fill(216, 12, 228, 20, YELLOW);
+    BACK_COLOR = WHITE;
 
     /* 顶部分隔线。 */
-    LCD_Fill(8, 27, 232, 29, BLACK);
+    LCD_Fill(0, 30, 239, 31, LGRAY);
 
     /* 棋盘边框。 */
-    LCD_DrawRectangle(BOARD_X_OFF - 1, BOARD_Y_OFF - 1,
-                      BOARD_X_OFF + BOARD_COLS * BLOCK_SIZE,
-                      BOARD_Y_OFF + BOARD_ROWS * BLOCK_SIZE);
+    draw_panel_box(BOARD_X_OFF - 3, BOARD_Y_OFF - 3,
+                   BOARD_X_OFF + BOARD_COLS * BLOCK_SIZE + 2,
+                   BOARD_Y_OFF + BOARD_ROWS * BLOCK_SIZE + 2, WHITE);
 
     /* 右侧信息面板。 */
-    POINT_COLOR = GRAY;
+    draw_panel_box(PANEL_X - 6, 40, 232, 246, WHITE);
+    POINT_COLOR = BLACK;
     LCD_ShowString(PANEL_X, NEXT_Y - 16, 56, 12, 12, (uint8_t *)"NEXT");
-    LCD_DrawRectangle(PANEL_X - 1, NEXT_Y - 1,
-                      PANEL_X + 4 * NEXT_SIZE,
-                      NEXT_Y  + 4 * NEXT_SIZE);
+    draw_panel_box(PANEL_X - 2, NEXT_Y - 2,
+                   PANEL_X + 4 * NEXT_SIZE + 1,
+                   NEXT_Y  + 4 * NEXT_SIZE + 1, WHITE);
 
     POINT_COLOR = BLACK;
     LCD_ShowString(PANEL_X, SCORE_Y - 14, 56, 12, 12, (uint8_t *)"SCORE");
     LCD_ShowString(PANEL_X, LINES_Y - 14, 56, 12, 12, (uint8_t *)"LINES");
     LCD_ShowString(PANEL_X, LEVEL_Y - 14, 56, 12, 12, (uint8_t *)"LEVEL");
 
-    POINT_COLOR = LGRAY;
-    LCD_ShowString(8, CTRL_Y,      88, 12, 12, (uint8_t *)"K0 LEFT");
-    LCD_ShowString(8, CTRL_Y + 14, 88, 12, 12, (uint8_t *)"K2 RIGHT");
-    LCD_ShowString(8, CTRL_Y + 28, 88, 12, 12, (uint8_t *)"K1 ROT");
-    LCD_ShowString(8, CTRL_Y + 42, 88, 12, 12, (uint8_t *)"UP DROP");
+    draw_panel_box(8, CTRL_Y - 6, 232, 302, WHITE);
+    POINT_COLOR = GRAY;
+    LCD_ShowString(16, CTRL_Y,      64, 12, 12, (uint8_t *)"K0 LEFT");
+    LCD_ShowString(16, CTRL_Y + 16, 72, 12, 12, (uint8_t *)"K2 RIGHT");
+    LCD_ShowString(116, CTRL_Y,     64, 12, 12, (uint8_t *)"K1 ROT");
+    LCD_ShowString(116, CTRL_Y + 16, 64, 12, 12, (uint8_t *)"UP DROP");
 
     /* 底部分隔线。 */
-    LCD_Fill(8, 306, 232, 307, BLACK);
+    LCD_Fill(8, 306, 232, 307, LGRAY);
     POINT_COLOR = LGRAY;
     LCD_ShowString(8, 309, 144, 12, 12, (uint8_t *)"STM32F407");
 }
@@ -557,45 +637,48 @@ static void draw_start_screen(void)
     static const uint16_t bar_c[] = { CYAN, MAGENTA, GREEN, YELLOW, RED, BLUE };
 
     LCD_Fill(0, BOARD_Y_OFF, 239, 305, WHITE);
+    LCD_Fill(0, 34, 239, 38, BLACK);
 
     for (int i = 0; i < 6; i++) {
-        LCD_Fill(12 + i * 18, 48, 26 + i * 18, 62, bar_c[i]);
+        LCD_Fill(14 + i * 18, 52, 28 + i * 18, 66, bar_c[i]);
+        POINT_COLOR = dim_color(bar_c[i]);
+        LCD_DrawRectangle(14 + i * 18, 52, 28 + i * 18, 66);
     }
 
     POINT_COLOR = BLACK; BACK_COLOR = WHITE;
 
-    LCD_ShowString(14, 82, 112, 24, 24, (uint8_t *)"TETRIS");
+    LCD_ShowString(14, 84, 112, 24, 24, (uint8_t *)"TETRIS");
 
-    LCD_Fill(14, 112, 122, 114, BLACK);
+    LCD_Fill(14, 114, 122, 116, BLACK);
 
-    POINT_COLOR = LGRAY;
+    draw_panel_box(14, 130, 124, 190, WHITE);
+    POINT_COLOR = GRAY;
 
-    LCD_ShowString(14, 132, 100, 12, 12, (uint8_t *)"KEY0 START");
+    LCD_ShowString(24, 142, 90, 12, 12, (uint8_t *)"KEY0 START");
 
-    LCD_ShowString(14, 150, 100, 12, 12, (uint8_t *)"KEY1 VOL-");
+    LCD_ShowString(24, 158, 90, 12, 12, (uint8_t *)"KEY1 VOL-");
 
-    LCD_ShowString(14, 168, 100, 12, 12, (uint8_t *)"KEY2 VOL+");
+    LCD_ShowString(24, 174, 90, 12, 12, (uint8_t *)"KEY2 VOL+");
 
     POINT_COLOR = BLACK; BACK_COLOR = WHITE;
 
-    LCD_ShowString(14, 198, 72, 12, 12, (uint8_t *)"BGM VOL");
-    LCD_ShowString(14, 232, 48, 12, 12, (uint8_t *)"BEST");
-    LCD_ShowxNum(58, 232, App_Settings_Get()->high_score, 5, 12, 0x80);
+    LCD_ShowString(14, 204, 72, 12, 12, (uint8_t *)"BGM VOL");
+    LCD_ShowString(14, 238, 48, 12, 12, (uint8_t *)"BEST");
+    LCD_ShowxNum(58, 238, App_Settings_Get()->high_score, 5, 12, 0x80);
 
-    POINT_COLOR = GRAY;
-    LCD_DrawRectangle(142, 48, 226, 206);
+    draw_panel_box(140, 48, 228, 206, WHITE);
+    POINT_COLOR = BLACK;
     LCD_ShowString(152, 60, 64, 12, 12, (uint8_t *)"GAME KEY");
     LCD_Fill(152, 76, 216, 77, LGRAY);
-    LCD_ShowString(152, 96, 64, 12, 12, (uint8_t *)"K0 LEFT");
-    LCD_ShowString(152, 116, 72, 12, 12, (uint8_t *)"K2 RIGHT");
-    LCD_ShowString(152, 136, 64, 12, 12, (uint8_t *)"K1 ROT");
-    LCD_ShowString(152, 156, 64, 12, 12, (uint8_t *)"UP DROP");
+    POINT_COLOR = GRAY;
+    LCD_ShowString(152, 94, 64, 12, 12, (uint8_t *)"K0 LEFT");
+    LCD_ShowString(152, 114, 72, 12, 12, (uint8_t *)"K2 RIGHT");
+    LCD_ShowString(152, 134, 64, 12, 12, (uint8_t *)"K1 ROT");
+    LCD_ShowString(152, 154, 64, 12, 12, (uint8_t *)"UP DROP");
+    LCD_ShowString(152, 184, 64, 12, 12, (uint8_t *)"UP REC");
 
-    POINT_COLOR = WHITE; BACK_COLOR = BLACK;
-
-    LCD_Fill(14, 248, 122, 278, BLACK);
-
-    LCD_ShowString(28, 257, 96, 12, 12, (uint8_t *)"PRESS KEY0");
+    draw_button(14, 254, 124, 282, "PRESS KEY0", 1);
+    draw_button(140, 254, 228, 282, "UP RECORD", 0);
 
     POINT_COLOR = LGRAY; BACK_COLOR = WHITE;
 
@@ -621,11 +704,13 @@ static void draw_eeprom_history_screen(void)
     start = (uint8_t)(menu_history_page * per_page);
 
     LCD_Fill(0, BOARD_Y_OFF, 239, 305, WHITE);
+    LCD_Fill(0, 34, 239, 38, BLACK);
     POINT_COLOR = BLACK;
     BACK_COLOR = WHITE;
 
     LCD_ShowString(12, 48, 180, 16, 16, (uint8_t *)"EEPROM RECORD");
     LCD_Fill(12, 68, 226, 70, BLACK);
+    draw_panel_box(12, 84, 226, 168, WHITE);
 
     POINT_COLOR = GRAY;
     LCD_ShowString(16, 92, 84, 12, 12, (uint8_t *)"BEST SCORE");
@@ -656,6 +741,7 @@ static void draw_eeprom_history_screen(void)
                 break;
             }
 
+            LCD_Fill(14, y - 4U, 224, y - 3U, LGRAY);
             LCD_ShowString(16, y, 12, 12, 12, (uint8_t *)"#");
             LCD_ShowxNum(28, y, (uint32_t)latest_index + 1U, 2, 12, 0x80);
             LCD_ShowxNum(58, y, rec.started_at.month, 2, 12, 0x80);
@@ -689,11 +775,14 @@ static void draw_menu_volume(void)
     }
 
     menu_volume_drawn = volume;
-    LCD_Fill(x, y, x + 106, y + 8, WHITE);
+    LCD_Fill(x, y, x + 112, y + 12, WHITE);
 
     for (uint8_t i = 0; i < 10; i++) {
+        uint16_t bx = (uint16_t)(x + i * 11U);
         uint16_t color = (i < volume) ? GREEN : LGRAY;
-        LCD_Fill(x + i * 10, y, x + i * 10 + 7, y + 7, color);
+        LCD_Fill(bx, y + 2U, bx + 8U, y + 10U, color);
+        POINT_COLOR = (i < volume) ? dim_color(GREEN) : GRAY;
+        LCD_DrawRectangle(bx, y + 2U, bx + 8U, y + 10U);
     }
 }
 
