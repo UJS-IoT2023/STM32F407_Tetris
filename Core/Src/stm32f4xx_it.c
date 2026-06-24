@@ -1,4 +1,4 @@
-/* USER CODE BEGIN Header */
+﻿/* USER CODE BEGIN Header */
 /**
   ******************************************************************************
   * @file    stm32f4xx_it.c
@@ -22,6 +22,7 @@
 #include "stm32f4xx_it.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "audio_bgm.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -41,7 +42,13 @@
 
 /* Private variables ---------------------------------------------------------*/
 /* USER CODE BEGIN PV */
-
+/* ---- TIM1 input capture IR decoder (NEC protocol) ---- */
+volatile uint8_t  ir_state;       /* 0=wait rising, 1=wait falling */
+volatile uint32_t ir_pulse_us;    /* captured HIGH pulse width (us) */
+volatile uint32_t ir_buf;         /* data shift register */
+volatile uint8_t  ir_bit_cnt;     /* bits collected */
+volatile uint8_t  ir_ready;       /* 1 = full 32-bit code ready */
+volatile uint32_t ir_code;        /* final decoded 32-bit NEC code */
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -55,6 +62,7 @@
 /* USER CODE END 0 */
 
 /* External variables --------------------------------------------------------*/
+extern TIM_HandleTypeDef htim1;
 extern TIM_HandleTypeDef htim3;
 /* USER CODE BEGIN EV */
 
@@ -199,6 +207,34 @@ void SysTick_Handler(void)
 /******************************************************************************/
 
 /**
+  * @brief This function handles TIM1 update interrupt and TIM10 global interrupt.
+  */
+void TIM1_UP_TIM10_IRQHandler(void)
+{
+  /* USER CODE BEGIN TIM1_UP_TIM10_IRQn 0 */
+
+  /* USER CODE END TIM1_UP_TIM10_IRQn 0 */
+  HAL_TIM_IRQHandler(&htim1);
+  /* USER CODE BEGIN TIM1_UP_TIM10_IRQn 1 */
+
+  /* USER CODE END TIM1_UP_TIM10_IRQn 1 */
+}
+
+/**
+  * @brief This function handles TIM1 capture compare interrupt.
+  */
+void TIM1_CC_IRQHandler(void)
+{
+  /* USER CODE BEGIN TIM1_CC_IRQn 0 */
+
+  /* USER CODE END TIM1_CC_IRQn 0 */
+  HAL_TIM_IRQHandler(&htim1);
+  /* USER CODE BEGIN TIM1_CC_IRQn 1 */
+
+  /* USER CODE END TIM1_CC_IRQn 1 */
+}
+
+/**
   * @brief This function handles TIM3 global interrupt.
   */
 void TIM3_IRQHandler(void)
@@ -212,6 +248,57 @@ void TIM3_IRQHandler(void)
   /* USER CODE END TIM3_IRQn 1 */
 }
 
-/* USER CODE BEGIN 1 */
+/**
+  * @brief This function handles DMA1 stream4 global interrupt.
+  */
+void DMA1_Stream4_IRQHandler(void)
+{
+  /* USER CODE BEGIN DMA1_Stream4_IRQn 0 */
 
+  /* USER CODE END DMA1_Stream4_IRQn 0 */
+  Audio_BGM_DMA_IRQHandler();
+  /* USER CODE BEGIN DMA1_Stream4_IRQn 1 */
+
+  /* USER CODE END DMA1_Stream4_IRQn 1 */
+}
+
+/* USER CODE BEGIN 1 */
+/* ---- TIM1 input capture callback (NEC pulse measurement) ---- */
+void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
+{
+    if (htim->Instance == TIM1 && htim->Channel == HAL_TIM_ACTIVE_CHANNEL_1) {
+        if (ir_state == 0) {
+            __HAL_TIM_SET_COUNTER(htim, 0);
+            __HAL_TIM_SET_CAPTUREPOLARITY(htim, TIM_CHANNEL_1,
+                TIM_INPUTCHANNELPOLARITY_FALLING);
+            ir_state = 1;
+        } else {
+            ir_pulse_us = HAL_TIM_ReadCapturedValue(htim, TIM_CHANNEL_1);
+            __HAL_TIM_SET_CAPTUREPOLARITY(htim, TIM_CHANNEL_1,
+                TIM_INPUTCHANNELPOLARITY_RISING);
+            ir_state = 0;
+
+            if (ir_pulse_us > 4000 && ir_pulse_us < 5000) {
+                ir_buf = 0; ir_bit_cnt = 0;
+            } else if (ir_pulse_us > 1300 && ir_pulse_us < 2000) {
+                ir_buf = (ir_buf << 1) | 1; ir_bit_cnt++;
+            } else if (ir_pulse_us > 300 && ir_pulse_us < 800) {
+                ir_buf = (ir_buf << 1) | 0; ir_bit_cnt++;
+            }
+            if (ir_bit_cnt >= 32) {
+                ir_code = ir_buf; ir_ready = 1; ir_bit_cnt = 0;
+            }
+        }
+    }
+}
+
+/* ---- TIM1 update event callback (IR timeout reset) ---- */
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+{
+    if (htim->Instance == TIM1) {
+        ir_state = 0;
+        __HAL_TIM_SET_CAPTUREPOLARITY(htim, TIM_CHANNEL_1,
+            TIM_INPUTCHANNELPOLARITY_RISING);
+    }
+}
 /* USER CODE END 1 */

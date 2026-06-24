@@ -1,0 +1,5 @@
+C:/Users/29750/Desktop/STM32F407_Tetris/Core/Src/fsmc.c:31:6:MX_FSMC_Init	64	static
+C:/Users/29750/Desktop/STM32F407_Tetris/Core/Src/fsmc.c:92:13:HAL_FSMC_MspInit	32	static
+C:/Users/29750/Desktop/STM32F407_Tetris/Core/Src/fsmc.c:190:6:HAL_SRAM_MspInit	16	static
+C:/Users/29750/Desktop/STM32F407_Tetris/Core/Src/fsmc.c:202:13:HAL_FSMC_MspDeInit	8	static
+C:/Users/29750/Desktop/STM32F407_Tetris/Core/Src/fsmc.c:271:6:HAL_SRAM_MspDeInit	16	static
